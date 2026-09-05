@@ -152,7 +152,14 @@ async function installPlatform(platform, build) {
 }
 
 async function main() {
-  for (const [platform, build] of Object.entries(BUILDS)) {
+  const platformFilter = process.env.SERPENT_MEDIA_CONVERTER_PLATFORMS;
+  const selected = platformFilter === undefined
+    ? Object.entries(BUILDS)
+    : Object.entries(BUILDS).filter(([platform]) => platformFilter.split(',').includes(platform));
+  if (selected.length === 0) {
+    throw new Error(`No platforms matched SERPENT_MEDIA_CONVERTER_PLATFORMS=${platformFilter}`);
+  }
+  for (const [platform, build] of selected) {
     await installPlatform(platform, build);
   }
   writeFileSync(

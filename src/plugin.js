@@ -4,22 +4,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { resolveFfmpegBinaries } = require('./ffmpeg-locator');
 const { cleanupStaleRequests, createJobRequest, deleteJobRequest, readJobRequest } = require('./job-request-store');
-const { deriveLibraryRoot, indexAssetSummaries } = require('./library-media');
+const { deriveLibraryRoot } = require('./library-media');
 const { commitOutput, processAsset } = require('./convert-pipeline');
 const { createAbortError } = require('./ffmpeg-runner');
 
 const PLUGIN_ID = 'com.dolag.serpent.media-converter';
-const PENDING_REQUEST_KEY = 'panel.pending-request';
 const LAST_RESULT_KEY = 'panel.last-result';
 const PROGRESS_UNITS_PER_ASSET = 100;
 const PROGRESS_FLUSH_MS = 250;
 const PROGRESS_MIN_UNIT_DELTA = 2;
-const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-const CONVERT_VIDEO_EXTENSIONS = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'ts', 'mts', 'm2ts'];
-const CONVERT_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'gif', 'avif'];
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -115,33 +109,15 @@ function resolveCommandTargets(context) {
   return { targetLibraryId, assetIds };
 }
 
-function isValidRequest(request) {
-  return request !== null
-    && typeof request === 'object'
-    && (request.kind === 'convert' || request.kind === 'compress')
-    && typeof request.libraryId === 'string' && request.libraryId.length > 0
-    && Array.isArray(request.assetIds) && request.assetIds.length > 0
-    && typeof request.createdAt === 'number'
-    && Date.now() - request.createdAt < PENDING_MAX_AGE_MS;
-}
-
 function createPluginRuntime(options = {}) {
   const packageRoot = options.packageRoot ?? path.resolve(__dirname, '..');
-  const runProcessOverride = options.runProcess;
-  const resolveBinariesOverride = options.resolveBinaries;
   let serpent;
   let lifecycleSignal;
   let jobsDirectory;
   let workRoot;
-  let settingsFfmpegPath = '';
   let currentCancellation;
   let initialized = false;
   let disposed = false;
-
-  function resolveBinaries() {
-    if (resolveBinariesOverride) return resolveBinariesOverride();
-    return resolveFfmpegBinaries(settingsFfmpegPath);
-  }
 
   function assertNotCancelled(jobSignal) {
     if (disposed || lifecycleSignal?.aborted) throw createAbortError('The plugin instance was disposed.');
@@ -162,7 +138,7 @@ function createPluginRuntime(options = {}) {
       throw new Error('The media Job target library does not match the request.');
     }
     const scoped = serpent.forLibrary(targetLibraryId);
-    const binaries = resolveBinaries();
+    const binaries = await serpent.media.getBinaryPaths();
     const cancellation = createCancellationBridge({ jobSignal, lifecycleSignal });
     currentCancellation = cancellation;
     const workDirectory = fs.mkdtempSync(path.join(workRoot, 'job-'));
@@ -170,36 +146,51 @@ function createPluginRuntime(options = {}) {
     const progressTotal = totalAssets * PROGRESS_UNITS_PER_ASSET;
     const progressSink = createJobProgressSink({
       total: progressTotal,
-      report: (input) => scoped.jobs.reportProgress({ jobId: job.jobId, ...input }),
+      report: (progress) => scoped.jobs.reportProgress({ jobId: job.jobId, ...progress }),
     });
     const committed = [];
     const failures = [];
     try {
       await progressSink.report({ completed: 0, phase: '准备', message: '读取资产信息' });
-      const summaries = await indexAssetSummaries({
-        assets: scoped.assets,
-        assetIds: request.assetIds,
-        signal: cancellation.signal,
-      });
+      const wanted = new Set(request.assetIds);
+      const summaries = [];
+      {
+        const found = new Set();
+        const pageSize = 200;
+        for (let offset = 0; wanted.size > found.size; offset += pageSize) {
+          cancellation.signal.throwIfAborted();
+          const page = await scoped.assets.list({ limit: pageSize, offset });
+          const items = Array.isArray(page?.items) ? page.items : [];
+          for (const summary of items) {
+            if (wanted.has(summary.assetId) && !found.has(summary.assetId)) {
+              found.add(summary.assetId);
+              summaries.push(summary);
+            }
+          }
+          if (items.length < pageSize) break;
+        }
+      }
       const linkedFolderPage = await scoped.linkedFolders.list({ limit: 200 }).catch(() => null);
       const linkedFolders = Array.isArray(linkedFolderPage?.items) ? linkedFolderPage.items : [];
 
-      for (const [index, assetId] of request.assetIds.entries()) {
-        assertNotCancelled(jobSignal);
-        const assetSummary = summaries.get(assetId);
-        const label = `第 ${index + 1}/${totalAssets} 个`;
-        if (assetSummary === undefined) {
+      const foundIds = new Set(summaries.map((summary) => summary.assetId));
+      for (const assetId of request.assetIds) {
+        if (!foundIds.has(assetId)) {
           failures.push({ assetId, displayName: assetId, error: '未找到资产信息。' });
-          continue;
         }
+      }
+
+      for (const [index, summary] of summaries.entries()) {
+        assertNotCancelled(jobSignal);
+        const label = `第 ${index + 1}/${totalAssets} 个`;
         const assetBase = index * PROGRESS_UNITS_PER_ASSET;
         try {
-          await progressSink.report({ completed: assetBase, phase: '读取', message: `${label} ${assetSummary.displayName}` });
+          await progressSink.report({ completed: assetBase, phase: '读取', message: `${label} ${summary.displayName}` });
           const processed = await processAsset({
             scoped,
             libraryRoot: request.libraryRoot ?? null,
             linkedFolders,
-            assetSummary,
+            assetSummary: summary,
             request,
             binaries,
             workDirectory,
@@ -209,7 +200,7 @@ function createPluginRuntime(options = {}) {
               return progressSink.reportPercent({
                 completed: units,
                 phase: request.kind === 'convert' ? '转换' : '压缩',
-                message: `${label} ${assetSummary.displayName} · ${Math.round(percent)}%`,
+                message: `${label} ${summary.displayName} · ${Math.round(percent)}%`,
               });
             },
           });
@@ -217,10 +208,10 @@ function createPluginRuntime(options = {}) {
           await progressSink.report({
             completed: assetBase + PROGRESS_UNITS_PER_ASSET - 5,
             phase: '写入',
-            message: `${label} ${assetSummary.displayName}`,
+            message: `${label} ${summary.displayName}`,
           });
           const outcome = await commitOutput({ scoped, processed, request, signal: cancellation.signal });
-          committed.push({ ...outcome, displayName: assetSummary.displayName });
+          committed.push({ ...outcome, displayName: summary.displayName });
           await progressSink.report({
             completed: (index + 1) * PROGRESS_UNITS_PER_ASSET,
             phase: '写入',
@@ -228,7 +219,7 @@ function createPluginRuntime(options = {}) {
           });
         } catch (error) {
           if (error?.name === 'AbortError') throw error;
-          failures.push({ assetId, displayName: assetSummary.displayName, error: errorMessage(error) });
+          failures.push({ assetId: summary.assetId, displayName: summary.displayName, error: errorMessage(error) });
         }
       }
 
@@ -275,12 +266,23 @@ function createPluginRuntime(options = {}) {
     }
   }
 
-  async function capturePending(context, kind) {
+  function labelFor(kind) {
+    return kind === 'compress' ? '压缩' : '格式转换';
+  }
+
+  async function runOpenDialogCommand(context, requestedKind) {
     const { targetLibraryId, assetIds } = resolveCommandTargets(context);
     if (typeof targetLibraryId !== 'string' || targetLibraryId.length === 0) {
       throw new Error('The command did not receive a target library.');
     }
     if (assetIds.length === 0) throw new Error('请先选择要处理的资产。');
+
+    const kind = requestedKind ?? 'convert';
+    const options = await serpent.ui.openDialog({
+      dialogId: 'converter',
+      payload: { kind, assetCount: assetIds.length },
+    });
+    if (options === null || typeof options !== 'object') return;
 
     let libraryRoot = null;
     try {
@@ -290,48 +292,17 @@ function createPluginRuntime(options = {}) {
       libraryRoot = null;
     }
 
-    const existing = await readState(serpent, PENDING_REQUEST_KEY);
     const request = {
-      kind: kind ?? (existing?.kind === 'compress' ? 'compress' : 'convert'),
+      kind,
       assetIds,
       libraryId: targetLibraryId,
       libraryRoot,
       createdAt: Date.now(),
+      options,
     };
-    await writeState(serpent, PENDING_REQUEST_KEY, request);
-    await notifyUser(serpent, {
-      severity: 'info',
-      title: kind === 'compress' ? '压缩' : '格式转换',
-      message: `已载入 ${assetIds.length} 个资产，请在侧栏「媒体转换」面板完成设置。`,
-    });
-  }
-
-  async function runFromPanel(context, kind) {
-    const { targetLibraryId } = resolveCommandTargets(context);
-    const pending = await readState(serpent, PENDING_REQUEST_KEY);
-    if (!isValidRequest(pending)) {
-      throw new Error('没有待处理的资产。请先在资产上右键选择「格式转换…」或「压缩…」。');
-    }
-    if (typeof targetLibraryId === 'string' && targetLibraryId.length > 0 && pending.libraryId !== targetLibraryId) {
-      throw new Error('待处理资产属于另一个资源库，请重新选择。');
-    }
-    const options = await readState(serpent, 'panel.options');
-    if (options === null || typeof options !== 'object') {
-      throw new Error('缺少转换 / 压缩设置。');
-    }
-
-    const scoped = serpent.forLibrary(pending.libraryId);
+    const scoped = serpent.forLibrary(targetLibraryId);
+    const requestFile = await createJobRequest({ directory: jobsDirectory, request });
     let result;
-    const requestFile = await createJobRequest({
-      directory: jobsDirectory,
-      request: {
-        kind: pending.kind,
-        libraryId: pending.libraryId,
-        libraryRoot: pending.libraryRoot ?? null,
-        assetIds: pending.assetIds,
-        options: { ...options, suffix: typeof options.suffix === 'string' ? options.suffix : '' },
-      },
-    });
     try {
       result = await scoped.jobs.enqueue({
         handlerId: 'media-convert',
@@ -343,18 +314,17 @@ function createPluginRuntime(options = {}) {
       throw error;
     }
     await writeState(serpent, LAST_RESULT_KEY, {
-      kind: pending.kind,
+      kind,
       jobId: result.jobId,
       completed: 0,
       failed: 0,
-      total: pending.assetIds.length,
+      total: assetIds.length,
       status: 'queued',
     });
-    await writeState(serpent, PENDING_REQUEST_KEY, null);
     await notifyUser(scoped, {
       severity: 'info',
-      title: pending.kind === 'convert' ? '格式转换' : '压缩',
-      message: `${pending.assetIds.length} 个资产的批处理任务已开始。`,
+      title: labelFor(kind),
+      message: `${assetIds.length} 个资产的批处理任务已开始。`,
     });
   }
 
@@ -374,14 +344,8 @@ function createPluginRuntime(options = {}) {
     fs.mkdirSync(workRoot, { recursive: true, mode: 0o700 });
     cleanupStaleRequests(jobsDirectory);
 
-    const ffmpegPathSetting = await serpent.storage.get('settings.ffmpeg-path', { scope: 'user' });
-    settingsFfmpegPath = typeof ffmpegPathSetting === 'string' ? ffmpegPathSetting : '';
-
-    serpent.commands.register('mediaconverter.open-convert', (commandContext) => capturePending(commandContext, 'convert'));
-    serpent.commands.register('mediaconverter.open-compress', (commandContext) => capturePending(commandContext, 'compress'));
-    serpent.commands.register('mediaconverter.capture-selection', (commandContext) => capturePending(commandContext, null));
-    serpent.commands.register('mediaconverter.run-convert', (commandContext) => runFromPanel(commandContext, 'convert'));
-    serpent.commands.register('mediaconverter.run-compress', (commandContext) => runFromPanel(commandContext, 'compress'));
+    serpent.commands.register('mediaconverter.open-convert', (commandContext) => runOpenDialogCommand(commandContext, 'convert'));
+    serpent.commands.register('mediaconverter.open-compress', (commandContext) => runOpenDialogCommand(commandContext, 'compress'));
     serpent.jobs.registerHandler('media-convert', handleMediaJob);
 
     if (typeof lifecycleSignal?.addEventListener === 'function') {
@@ -420,7 +384,6 @@ async function dispose(reason) {
 
 module.exports = {
   PLUGIN_ID,
-  PENDING_REQUEST_KEY,
   PROGRESS_UNITS_PER_ASSET,
   createPluginRuntime,
   dispose,

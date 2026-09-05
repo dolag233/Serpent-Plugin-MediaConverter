@@ -5,7 +5,6 @@ const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { resolveFfmpegBinaries } = require('../src/ffmpeg-locator');
 
 const manifestPath = path.join(__dirname, '..', 'serpent-plugin.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -26,7 +25,7 @@ test('manifest declares the Plugin API 1 unrestricted runtime', () => {
 test('permissions are unique and minimal for the media pipeline', () => {
   const permissions = manifest.permissions;
   assert.equal(new Set(permissions).size, permissions.length);
-  for (const required of ['asset.read', 'content.read', 'content.write', 'file.import', 'data.files', 'job.manage', 'library.read', 'storage.read', 'storage.write', 'ui.notify']) {
+  for (const required of ['asset.read', 'content.read', 'content.write', 'file.import', 'data.files', 'job.manage', 'library.read', 'storage.read', 'storage.write', 'ui.notify', 'ui.dialogs', 'media.binaries']) {
     requireCondition(permissions.includes(required), `missing permission ${required}`);
   }
   requireCondition(!permissions.includes('secrets.read'), 'the plugin must not request secrets');
@@ -49,18 +48,14 @@ test('contributes asset context menu items for convert and compress', () => {
   }
 });
 
-test('every run command and job handler is declared', () => {
+test('declares the modal converter dialog', () => {
   const jobs = manifest.contributes.jobs;
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].id, 'media-convert');
-  const view = manifest.contributes.views.find((entry) => entry.id === 'converter-panel');
-  assert(view !== undefined && view.location === 'sidebar');
-  assert(view.entry === 'entry/ui/panel.html');
-  assert(fs.existsSync(path.join(__dirname, '..', view.entry)));
+  const dialog = (manifest.contributes.dialogs ?? []).find((entry) => entry.id === 'converter');
+  assert(dialog !== undefined && dialog.entry === 'entry/ui/panel.html');
+  assert.equal(manifest.contributes.views.length, 0);
+  assert(fs.existsSync(path.join(__dirname, '..', dialog.entry)));
 });
 
-test('binary locator prefers settings, then bundled, then PATH', () => {
-  const root = path.join(__dirname, '..', 'src');
-  assert(typeof resolveFfmpegBinaries === 'function');
-  assert(fs.existsSync(path.join(root, 'ffmpeg-runner.js')));
-});
+

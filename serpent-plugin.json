@@ -27,7 +27,9 @@
     "library.read",
     "storage.read",
     "storage.write",
-    "ui.notify"
+    "ui.notify",
+    "ui.dialogs",
+    "media.binaries"
   ],
   "contributes": {
     "commands": [
@@ -42,18 +44,6 @@
         "title": "压缩…",
         "when": "selection.assetCount == selection.count && selection.assetCount != 0 && (selection.extensions intersects ['mp4','mov','mkv','webm','avi','m4v','ts','mts','m2ts'] || selection.extensions intersects ['jpg','jpeg','png','webp','bmp','tif','tiff','gif','avif'])",
         "enablement": "library.writable && selection.hasDeleted == false && selection.hasUnavailable == false"
-      },
-      {
-        "id": "mediaconverter.capture-selection",
-        "title": "捕获当前选择"
-      },
-      {
-        "id": "mediaconverter.run-convert",
-        "title": "开始格式转换"
-      },
-      {
-        "id": "mediaconverter.run-compress",
-        "title": "开始压缩"
       }
     ],
     "menus": {
@@ -78,19 +68,12 @@
     "inspector": [],
     "viewerActions": [],
     "shortcuts": [],
-    "views": [
-      {
-        "id": "converter-panel",
-        "title": "媒体转换",
-        "location": "sidebar",
-        "entry": "entry/ui/panel.html"
-      }
-    ],
+    "views": [],
     "settings": [
       {
         "id": "ffmpeg-path",
-        "title": "FFmpeg 可执行文件路径",
-        "description": "留空时自动使用插件捆绑的 FFmpeg，或系统 PATH 中的 ffmpeg。",
+        "title": "FFmpeg 可执行文件路径（可选覆盖）",
+        "description": "留空使用宿主内置 FFmpeg。",
         "type": "string",
         "default": ""
       }
@@ -134,19 +117,14 @@
         }
       }
     ],
-    "ui": {
-      "version": 1,
-      "settings": {
-        "groups": [
-          {
-            "id": "media-converter",
-            "title": "媒体转换 / 压缩",
-            "items": [
-              { "settingId": "ffmpeg-path" }
-            ]
-          }
-        ]
+    "dialogs": [
+      {
+        "id": "converter",
+        "title": "媒体转换 / 压缩",
+        "entry": "entry/ui/panel.html",
+        "width": 620,
+        "height": 760
       }
-    }
+    ]
   }
 }

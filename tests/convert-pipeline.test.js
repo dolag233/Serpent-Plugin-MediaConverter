@@ -197,26 +197,16 @@ test('commit stages and replaces for compress requests', async () => {
 test('plugin setup registers commands and the media-convert handler', async () => {
   const commands = new Map();
   const handlers = new Map();
-  const storage = new Map();
-  const runtime = createPluginRuntime({
-    resolveBinaries: () => ({ ffmpeg: 'ffmpeg-fake', ffprobe: 'ffprobe-fake' }),
-  });
+  const runtime = createPluginRuntime();
   await runtime.setup({
     pluginId: 'com.dolag.serpent.media-converter',
     serpent: {
+      media: {
+        async getBinaryPaths() { return { ffmpegPath: 'ffmpeg-fake', ffprobePath: 'ffprobe-fake' }; },
+      },
       data: {
         async getDirectory({ scope }) {
           return { path: path.join(os.tmpdir(), `media-converter-data-${scope}`), scope };
-        },
-      },
-      storage: {
-        async get(key, { scope }) {
-          void scope;
-          return storage.get(key) ?? null;
-        },
-        async set(key, value, { scope }) {
-          void scope;
-          storage.set(key, value);
         },
       },
       commands: {
@@ -232,25 +222,7 @@ test('plugin setup registers commands and the media-convert handler', async () =
 
   assert.ok(commands.has('mediaconverter.open-convert'));
   assert.ok(commands.has('mediaconverter.open-compress'));
-  assert.ok(commands.has('mediaconverter.capture-selection'));
-  assert.ok(commands.has('mediaconverter.run-convert'));
-  assert.ok(commands.has('mediaconverter.run-compress'));
   assert.ok(handlers.has('media-convert'));
-
-  // The open-convert command captures the invocation selection for the panel.
-  await commands.get('mediaconverter.open-convert')({
-    invocation: {
-      libraryId: 'lib-1',
-      selection: { assetIds: ['a1', 'a2'] },
-    },
-  });
-  assert.deepEqual(storage.get('panel.pending-request'), {
-    kind: 'convert',
-    assetIds: ['a1', 'a2'],
-    libraryId: 'lib-1',
-    libraryRoot: null,
-    createdAt: storage.get('panel.pending-request').createdAt,
-  });
 
   await runtime.dispose('test');
 });
