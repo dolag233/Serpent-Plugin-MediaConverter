@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>媒体转换 / 压缩</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 12px;
+      font-family: system-ui, sans-serif;
+      font-size: 12px; line-height: 1.5;
+      color: var(--serpent-plugin-ref-content-primary, var(--ui-content-primary, inherit));
+      background: transparent;
+    }
+    h1 { font-size: 13px; margin: 0 0 8px; }
+    .hint { color: var(--serpent-plugin-ref-content-tertiary, var(--ui-content-tertiary, gray)); margin: 0 0 10px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+    .tabs button {
+      flex: 1; padding: 5px 0; cursor: pointer;
+      border: 1px solid var(--serpent-plugin-ref-border-control, var(--ui-border-control, #8884));
+      border-radius: 6px; background: transparent; color: inherit;
+    }
+    .tabs button.is-active {
+      background: var(--serpent-plugin-ref-action-accent, var(--ui-action-accent, #4a90d9));
+      color: #fff; border-color: transparent;
+    }
+    fieldset {
+      border: 1px solid var(--serpent-plugin-ref-border-divider, var(--ui-border-divider, #8883));
+      border-radius: 8px; margin: 0 0 10px; padding: 8px 10px 10px;
+    }
+    legend { font-weight: 600; padding: 0 4px; }
+    label.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+    label.row > span:first-child { color: var(--serpent-plugin-ref-content-secondary, var(--ui-content-secondary, gray)); }
+    select, input[type="number"], input[type="text"] {
+      min-width: 0; flex: 0 0 140px;
+      padding: 3px 6px; border-radius: 6px; font: inherit; color: inherit;
+      border: 1px solid var(--serpent-plugin-ref-border-control, var(--ui-border-control, #8884));
+      background: transparent;
+    }
+    textarea {
+      width: 100%; min-height: 48px; resize: vertical; font: inherit;
+      padding: 4px 6px; border-radius: 6px; color: inherit;
+      border: 1px solid var(--serpent-plugin-ref-border-control, var(--ui-border-control, #8884));
+      background: transparent;
+    }
+    .primary {
+      width: 100%; margin-top: 4px; padding: 6px 0; cursor: pointer;
+      border: 0; border-radius: 8px; font-weight: 600;
+      background: var(--serpent-plugin-ref-action-accent, var(--ui-action-accent, #4a90d9));
+      color: #fff;
+    }
+    .primary:disabled { opacity: 0.55; cursor: default; }
+    .status { margin: 8px 0 0; white-space: pre-wrap; word-break: break-all; }
+    .status.is-error { color: var(--serpent-plugin-ref-state-error, var(--ui-status-danger, #c33)); }
+    .status.is-success { color: var(--serpent-plugin-ref-state-success, var(--ui-status-success, #3a3)); }
+    .hidden { display: none; }
+    .radio-row { display: flex; gap: 12px; margin: 6px 0; }
+    .radio-row label { display: flex; align-items: center; gap: 4px; }
+    .failures { margin: 6px 0 0; padding-left: 16px; }
+    .failures li { word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>媒体转换 / 压缩</h1>
+  <p class="hint" id="pending-hint">尚未载入资产：请在资产上右键选择「格式转换…」或「压缩…」。</p>
+
+  <div class="tabs">
+    <button id="tab-convert" type="button">格式转换</button>
+    <button id="tab-compress" type="button">压缩</button>
+  </div>
+
+  <fieldset id="section-convert">
+    <legend>格式转换设置</legend>
+    <label class="row"><span>视频输出格式</span>
+      <select id="convert-video-format">
+        <option value="mp4">MP4 (H.264)</option>
+        <option value="mov">MOV</option>
+        <option value="mkv">MKV</option>
+        <option value="webm">WebM (VP9)</option>
+      </select>
+    </label>
+    <label class="row"><span>视频编码</span>
+      <select id="convert-video-codec">
+        <option value="h264">H.264</option>
+        <option value="h265">H.265 / HEVC</option>
+      </select>
+    </label>
+    <label class="row"><span>音频</span>
+      <select id="convert-audio">
+        <option value="aac">AAC 192k</option>
+        <option value="copy">复制原始音频</option>
+        <option value="none">移除音频</option>
+      </select>
+    </label>
+    <label class="row"><span>图像输出格式</span>
+      <select id="convert-image-format">
+        <option value="jpg">JPG</option>
+        <option value="png">PNG</option>
+        <option value="webp">WebP</option>
+        <option value="avif">AVIF</option>
+      </select>
+    </label>
+    <label class="row"><span>输出文件后缀</span>
+      <input type="text" id="convert-suffix" value="_converted" />
+    </label>
+  </fieldset>
+
+  <fieldset id="section-compress" class="hidden">
+    <legend>压缩设置</legend>
+    <label class="row"><span>压缩目标</span>
+      <select id="compress-target-mode">
+        <option value="percent">原文件大小的百分比</option>
+        <option value="size">目标大小以下</option>
+        <option value="quality">固定质量（CRF）</option>
+      </select>
+    </label>
+    <label class="row" id="row-percent"><span>目标百分比</span>
+      <input type="number" id="compress-percent" min="5" max="95" step="5" value="50" />
+    </label>
+    <label class="row hidden" id="row-size"><span>目标大小 (MB)</span>
+      <input type="number" id="compress-size-mb" min="0.1" step="0.1" value="10" />
+    </label>
+    <label class="row hidden" id="row-crf"><span>质量 CRF（14 高质量）</span>
+      <input type="number" id="compress-crf" min="14" max="34" step="1" value="23" />
+    </label>
+    <label class="row"><span>音频</span>
+      <select id="compress-audio">
+        <option value="aac">AAC（自动码率）</option>
+        <option value="copy">复制原始音频</option>
+        <option value="none">移除音频</option>
+      </select>
+    </label>
+    <label class="row"><span>视频编码</span>
+      <select id="compress-video-codec">
+        <option value="h264">H.264</option>
+        <option value="h265">H.265 / HEVC</option>
+      </select>
+    </label>
+    <div class="radio-row">
+      <label><input type="radio" name="compress-output" value="replace" checked />替换原资产</label>
+      <label><input type="radio" name="compress-output" value="new" />导入为新资产</label>
+    </div>
+    <label class="row"><span>输出文件后缀（新资产）</span>
+      <input type="text" id="compress-suffix" value="_compressed" />
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>FFmpeg 高级参数</legend>
+    <textarea id="advanced-args" placeholder="可选。追加在输出文件之前的额外参数，如 -vf scale=1920:-2"></textarea>
+  </fieldset>
+
+  <button id="start" class="primary" type="button">开始处理</button>
+  <p class="status" id="status"></p>
+  <ul class="failures" id="failures"></ul>
+
+  <script src="panel.js"></script>
+</body>
+</html>

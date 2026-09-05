@@ -1,0 +1,152 @@
+{
+  "manifestVersion": 1,
+  "id": "com.dolag.serpent.media-converter",
+  "version": "0.1.0",
+  "name": "Media Converter",
+  "description": "Batch format conversion and compression for video and image assets, powered by FFmpeg.",
+  "author": "Dolag",
+  "license": "MIT",
+  "repository": "https://github.com/dolag233/Serpent-Plugin-MediaConverter",
+  "engines": {
+    "serpent": ">=0.1.0 <1.0.0",
+    "pluginApi": 1
+  },
+  "runtime": {
+    "mode": "unrestricted",
+    "entry": "entry/main.js",
+    "instanceScope": "global"
+  },
+  "permissions": [
+    "asset.read",
+    "content.read",
+    "content.write",
+    "data.files",
+    "file.import",
+    "folder.read",
+    "job.manage",
+    "library.read",
+    "storage.read",
+    "storage.write",
+    "ui.notify"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "mediaconverter.open-convert",
+        "title": "格式转换…",
+        "when": "selection.assetCount == selection.count && selection.assetCount != 0 && (selection.extensions intersects ['mp4','mov','mkv','webm','avi','m4v','ts','mts','m2ts'] || selection.extensions intersects ['jpg','jpeg','png','webp','bmp','tif','tiff','gif','avif'])",
+        "enablement": "library.writable && selection.hasDeleted == false && selection.hasUnavailable == false"
+      },
+      {
+        "id": "mediaconverter.open-compress",
+        "title": "压缩…",
+        "when": "selection.assetCount == selection.count && selection.assetCount != 0 && (selection.extensions intersects ['mp4','mov','mkv','webm','avi','m4v','ts','mts','m2ts'] || selection.extensions intersects ['jpg','jpeg','png','webp','bmp','tif','tiff','gif','avif'])",
+        "enablement": "library.writable && selection.hasDeleted == false && selection.hasUnavailable == false"
+      },
+      {
+        "id": "mediaconverter.capture-selection",
+        "title": "捕获当前选择"
+      },
+      {
+        "id": "mediaconverter.run-convert",
+        "title": "开始格式转换"
+      },
+      {
+        "id": "mediaconverter.run-compress",
+        "title": "开始压缩"
+      }
+    ],
+    "menus": {
+      "asset": [
+        {
+          "title": "格式转换…",
+          "command": "mediaconverter.open-convert",
+          "group": "media-tools",
+          "when": "selection.assetCount == selection.count && selection.assetCount != 0 && (selection.extensions intersects ['mp4','mov','mkv','webm','avi','m4v','ts','mts','m2ts'] || selection.extensions intersects ['jpg','jpeg','png','webp','bmp','tif','tiff','gif','avif'])",
+          "enablement": "library.writable && selection.hasDeleted == false && selection.hasUnavailable == false"
+        },
+        {
+          "title": "压缩…",
+          "command": "mediaconverter.open-compress",
+          "group": "media-tools",
+          "when": "selection.assetCount == selection.count && selection.assetCount != 0 && (selection.extensions intersects ['mp4','mov','mkv','webm','avi','m4v','ts','mts','m2ts'] || selection.extensions intersects ['jpg','jpeg','png','webp','bmp','tif','tiff','gif','avif'])",
+          "enablement": "library.writable && selection.hasDeleted == false && selection.hasUnavailable == false"
+        }
+      ]
+    },
+    "toolbar": [],
+    "inspector": [],
+    "viewerActions": [],
+    "shortcuts": [],
+    "views": [
+      {
+        "id": "converter-panel",
+        "title": "媒体转换",
+        "location": "sidebar",
+        "entry": "entry/ui/panel.html"
+      }
+    ],
+    "settings": [
+      {
+        "id": "ffmpeg-path",
+        "title": "FFmpeg 可执行文件路径",
+        "description": "留空时自动使用插件捆绑的 FFmpeg，或系统 PATH 中的 ffmpeg。",
+        "type": "string",
+        "default": ""
+      }
+    ],
+    "hooks": [],
+    "jobs": [
+      {
+        "id": "media-convert",
+        "title": "媒体转换 / 压缩",
+        "recovery": "idempotent"
+      }
+    ],
+    "providers": [],
+    "themes": [
+      {
+        "id": "panel",
+        "version": 1,
+        "light": {
+          "references": {
+            "content-primary": "content.primary",
+            "content-secondary": "content.secondary",
+            "content-tertiary": "content.tertiary",
+            "border-control": "border.control",
+            "border-divider": "border.divider",
+            "action-accent": "action.accent",
+            "state-error": "state.error",
+            "state-success": "state.success"
+          }
+        },
+        "dark": {
+          "references": {
+            "content-primary": "content.primary",
+            "content-secondary": "content.secondary",
+            "content-tertiary": "content.tertiary",
+            "border-control": "border.control",
+            "border-divider": "border.divider",
+            "action-accent": "action.accent",
+            "state-error": "state.error",
+            "state-success": "state.success"
+          }
+        }
+      }
+    ],
+    "ui": {
+      "version": 1,
+      "settings": {
+        "groups": [
+          {
+            "id": "media-converter",
+            "title": "媒体转换 / 压缩",
+            "items": [
+              { "settingId": "ffmpeg-path" }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
