@@ -5,15 +5,34 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { cleanupStaleRequests, createJobRequest, deleteJobRequest, readJobRequest } = require('./job-request-store');
-const { deriveLibraryRoot } = require('./library-media');
-const { commitOutput, processAsset } = require('./convert-pipeline');
-const { createAbortError } = require('./ffmpeg-runner');
+const { deriveLibraryRoot, indexAssetSummaries, normalizeAssetSummary } = require('./library-media');
+const { commitOutput, isImageAsset, isVideoAsset, processAsset, shouldReplaceOriginal } = require('./convert-pipeline');
+const { createAbortError, listFfmpegEncoders, pickVideoEncoders } = require('./ffmpeg-runner');
+const { resolveHostBinaries } = require('./host-binaries');
+const {
+  optionsFromWidgetValues,
+  renderCompressDialog,
+  renderConvertDialog,
+} = require('./dialog-ui');
 
 const PLUGIN_ID = 'com.dolag.serpent.media-converter';
 const LAST_RESULT_KEY = 'panel.last-result';
 const PROGRESS_UNITS_PER_ASSET = 100;
 const PROGRESS_FLUSH_MS = 250;
 const PROGRESS_MIN_UNIT_DELTA = 2;
+
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'ts', 'mts', 'm2ts']);
+const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'gif', 'avif']);
+
+let cachedEncoders = null;
+async function getCachedEncoders(ffmpegPath, signal) {
+  if (cachedEncoders !== null) return cachedEncoders;
+  const listed = await listFfmpegEncoders(ffmpegPath, signal);
+  cachedEncoders = pickVideoEncoders(listed);
+  return cachedEncoders;
+}
+
+const inFlightAssetIds = new Set();
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -106,7 +125,108 @@ function resolveCommandTargets(context) {
   const assetIds = Array.isArray(invocationAssetIds)
     ? [...invocationAssetIds]
     : Array.isArray(context?.assetIds) ? [...context.assetIds] : [];
-  return { targetLibraryId, assetIds };
+  const invocationAssets = Array.isArray(invocation?.selection?.assets)
+    ? invocation.selection.assets.map(normalizeAssetSummary).filter(Boolean)
+    : [];
+  return { targetLibraryId, assetIds, assets: invocationAssets };
+}
+
+function classifyAssets(summaries) {
+  const counts = { imageCount: 0, videoCount: 0, total: summaries.length };
+  for (const summary of summaries) {
+    if (isVideoAsset(summary)) counts.videoCount += 1;
+    else if (isImageAsset(summary)) counts.imageCount += 1;
+  }
+  return counts;
+}
+
+function classifySelectionFromAssets(assetIds, assets) {
+  const wanted = new Set(assetIds);
+  const summaries = assets.filter((summary) => wanted.has(summary.assetId));
+  if (summaries.length === 0) return { imageCount: 0, videoCount: 0, total: assetIds.length };
+  return { ...classifyAssets(summaries), total: assetIds.length };
+}
+
+function filterTargetsForCommand(kind, assetIds, assets) {
+  if (kind !== 'convert') {
+    return {
+      assetIds: [...assetIds],
+      assets: [...assets],
+      skippedImageCount: 0,
+      skippedOtherCount: 0,
+    };
+  }
+  const index = new Map(assets.map((summary) => [summary.assetId, summary]));
+  const keptIds = [];
+  const keptAssets = [];
+  let skippedImageCount = 0;
+  let skippedOtherCount = 0;
+  for (const assetId of assetIds) {
+    const summary = index.get(assetId);
+    if (summary === undefined) {
+      keptIds.push(assetId);
+      continue;
+    }
+    if (isVideoAsset(summary)) {
+      keptIds.push(assetId);
+      keptAssets.push(summary);
+      continue;
+    }
+    if (isImageAsset(summary)) skippedImageCount += 1;
+    else skippedOtherCount += 1;
+  }
+  return { assetIds: keptIds, assets: keptAssets, skippedImageCount, skippedOtherCount };
+}
+
+function deriveSelectionFromContext(context, assetIds, assets) {
+  if (Array.isArray(assets) && assets.length > 0) {
+    return classifySelectionFromAssets(assetIds, assets);
+  }
+  const selection = context?.invocation?.selection;
+  const mediaTypes = Array.isArray(selection?.mediaTypes) ? selection.mediaTypes : [];
+  const extensions = Array.isArray(selection?.extensions)
+    ? selection.extensions.map((e) => String(e).toLowerCase().replace(/^\./, ''))
+    : [];
+
+  let hasVideo = mediaTypes.includes('video');
+  let hasImage = mediaTypes.includes('image');
+  if (!hasVideo && !hasImage && extensions.length > 0) {
+    hasVideo = extensions.some((ext) => VIDEO_EXTENSIONS.has(ext));
+    hasImage = extensions.some((ext) => IMAGE_EXTENSIONS.has(ext));
+  }
+
+  if (hasVideo && !hasImage) {
+    return { imageCount: 0, videoCount: assetIds.length, total: assetIds.length };
+  }
+  if (hasImage && !hasVideo) {
+    return { imageCount: assetIds.length, videoCount: 0, total: assetIds.length };
+  }
+  return { imageCount: 0, videoCount: 0, total: assetIds.length };
+}
+
+function indexFromSnapshots(items) {
+  const index = new Map();
+  if (!Array.isArray(items)) return index;
+  for (const item of items) {
+    const summary = normalizeAssetSummary(item);
+    if (summary) index.set(summary.assetId, summary);
+  }
+  return index;
+}
+
+function unwrapDialogResult(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object') return null;
+  if ('videoFormat' in value || 'targetMode' in value || 'videoCodec' in value
+    || 'imageTargetMode' in value || 'videoTargetMode' in value) {
+    return value;
+  }
+  if ('result' in value) {
+    const inner = value.result;
+    if (inner === null || inner === undefined) return null;
+    if (typeof inner === 'object') return inner;
+  }
+  return value;
 }
 
 function createPluginRuntime(options = {}) {
@@ -138,12 +258,12 @@ function createPluginRuntime(options = {}) {
       throw new Error('The media Job target library does not match the request.');
     }
     const scoped = serpent.forLibrary(targetLibraryId);
-    const binaries = await serpent.media.getBinaryPaths();
+    const binaries = await resolveHostBinaries(serpent);
     const cancellation = createCancellationBridge({ jobSignal, lifecycleSignal });
     currentCancellation = cancellation;
     const workDirectory = fs.mkdtempSync(path.join(workRoot, 'job-'));
-    const totalAssets = request.assetIds.length;
-    const progressTotal = totalAssets * PROGRESS_UNITS_PER_ASSET;
+    let totalAssets = request.assetIds.length;
+    const progressTotal = Math.max(1, totalAssets) * PROGRESS_UNITS_PER_ASSET;
     const progressSink = createJobProgressSink({
       total: progressTotal,
       report: (progress) => scoped.jobs.reportProgress({ jobId: job.jobId, ...progress }),
@@ -152,30 +272,67 @@ function createPluginRuntime(options = {}) {
     const failures = [];
     try {
       await progressSink.report({ completed: 0, phase: '准备', message: '读取资产信息' });
-      const wanted = new Set(request.assetIds);
-      const summaries = [];
-      {
-        const found = new Set();
-        const pageSize = 200;
-        for (let offset = 0; wanted.size > found.size; offset += pageSize) {
-          cancellation.signal.throwIfAborted();
-          const page = await scoped.assets.list({ limit: pageSize, offset });
-          const items = Array.isArray(page?.items) ? page.items : [];
-          for (const summary of items) {
-            if (wanted.has(summary.assetId) && !found.has(summary.assetId)) {
-              found.add(summary.assetId);
-              summaries.push(summary);
+      const encoders = await getCachedEncoders(binaries.ffmpeg, cancellation.signal);
+      if (encoders.h264 === null && encoders.hevc === null && encoders.vp9 === null && encoders.av1 === null) {
+        throw new Error('宿主 FFmpeg 没有可用的视频编码器。');
+      }
+      const jobBinaries = { ...binaries, encoders };
+      const index = indexFromSnapshots(request.assets);
+      const missing = request.assetIds.filter((assetId) => !index.has(assetId));
+      if (missing.length > 0) {
+        const listedSummaries = await indexAssetSummaries({
+          assets: scoped.assets,
+          assetIds: missing,
+          signal: cancellation.signal,
+        });
+        for (const [assetId, summary] of listedSummaries) index.set(assetId, summary);
+      }
+      if (shouldReplaceOriginal(request)) {
+        const missingRevision = request.assetIds.filter((assetId) => {
+          const summary = index.get(assetId);
+          return summary !== undefined
+            && (typeof summary.currentRevisionId !== 'string' || summary.currentRevisionId.length === 0);
+        });
+        if (missingRevision.length > 0) {
+          const listedSummaries = await indexAssetSummaries({
+            assets: scoped.assets,
+            assetIds: missingRevision,
+            signal: cancellation.signal,
+          });
+          for (const [assetId, summary] of listedSummaries) {
+            const existing = index.get(assetId);
+            if (existing === undefined) {
+              index.set(assetId, summary);
+              continue;
             }
+            index.set(assetId, {
+              ...existing,
+              currentRevisionId: summary.currentRevisionId ?? existing.currentRevisionId,
+              managedFolderId: existing.managedFolderId ?? summary.managedFolderId,
+            });
           }
-          if (items.length < pageSize) break;
         }
       }
-      const linkedFolderPage = await scoped.linkedFolders.list({ limit: 200 }).catch(() => null);
+      const loadedSummaries = request.assetIds
+        .map((assetId) => index.get(assetId))
+        .filter((summary) => summary !== undefined);
+      const skippedNonVideo = [];
+      const summaries = request.kind === 'convert'
+        ? loadedSummaries.filter((summary) => {
+          if (isVideoAsset(summary)) return true;
+          skippedNonVideo.push(summary);
+          return false;
+        })
+        : loadedSummaries;
+      totalAssets = summaries.length;
+      const needsLinked = summaries.some((summary) => summary.locationKind === 'linked');
+      const linkedFolderPage = needsLinked
+        ? await scoped.linkedFolders.list({ limit: 200 }).catch(() => null)
+        : null;
       const linkedFolders = Array.isArray(linkedFolderPage?.items) ? linkedFolderPage.items : [];
 
-      const foundIds = new Set(summaries.map((summary) => summary.assetId));
       for (const assetId of request.assetIds) {
-        if (!foundIds.has(assetId)) {
+        if (!index.has(assetId)) {
           failures.push({ assetId, displayName: assetId, error: '未找到资产信息。' });
         }
       }
@@ -192,7 +349,7 @@ function createPluginRuntime(options = {}) {
             linkedFolders,
             assetSummary: summary,
             request,
-            binaries,
+            binaries: jobBinaries,
             workDirectory,
             signal: cancellation.signal,
             onPercent(percent) {
@@ -237,10 +394,14 @@ function createPluginRuntime(options = {}) {
         status: failures.length > 0 && committed.length === 0 ? 'failed' : 'succeeded',
       };
       await writeState(serpent, LAST_RESULT_KEY, result);
+      const skippedNote = skippedNonVideo.length > 0
+        ? `，跳过 ${skippedNonVideo.length} 个非视频`
+        : '';
       await notifyUser(scoped, {
         severity: failures.length > 0 ? 'warning' : 'info',
-        title: request.kind === 'convert' ? '格式转换完成' : '压缩完成',
+        title: request.kind === 'convert' ? '视频转码完成' : '媒体压缩完成',
         message: `${committed.length}/${totalAssets} 个成功`
+          + skippedNote
           + (failures.length > 0 ? `，${failures.length} 个失败：${failures[0].error}` : '。'),
       });
     } catch (error) {
@@ -255,11 +416,14 @@ function createPluginRuntime(options = {}) {
       }).catch(() => undefined);
       await notifyUser(scoped, {
         severity: 'error',
-        title: request.kind === 'convert' ? '格式转换失败' : '压缩失败',
+        title: request.kind === 'convert' ? '视频转码失败' : '媒体压缩失败',
         message: errorMessage(error),
       });
       throw error;
     } finally {
+      if (Array.isArray(request?.assetIds)) {
+        for (const id of request.assetIds) inFlightAssetIds.delete(id);
+      }
       cancellation.dispose();
       if (currentCancellation === cancellation) currentCancellation = undefined;
       try { fs.rmSync(workDirectory, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -267,22 +431,66 @@ function createPluginRuntime(options = {}) {
   }
 
   function labelFor(kind) {
-    return kind === 'compress' ? '压缩' : '格式转换';
+    return kind === 'compress' ? '媒体压缩' : '视频转码';
   }
 
   async function runOpenDialogCommand(context, requestedKind) {
-    const { targetLibraryId, assetIds } = resolveCommandTargets(context);
+    const { targetLibraryId, assetIds: selectedAssetIds, assets: selectedAssets } = resolveCommandTargets(context);
     if (typeof targetLibraryId !== 'string' || targetLibraryId.length === 0) {
       throw new Error('The command did not receive a target library.');
     }
-    if (assetIds.length === 0) throw new Error('请先选择要处理的资产。');
+    if (selectedAssetIds.length === 0) throw new Error('请先选择要处理的资产。');
+    if (typeof serpent.ui?.openDialog !== 'function') {
+      throw new Error('当前 Serpent 未提供对话框接口。请升级宿主后再试。');
+    }
 
     const kind = requestedKind ?? 'convert';
-    const options = await serpent.ui.openDialog({
-      dialogId: 'converter',
-      payload: { kind, assetCount: assetIds.length },
+    const scoped = serpent.forLibrary(targetLibraryId);
+    const filtered = filterTargetsForCommand(kind, selectedAssetIds, selectedAssets);
+    if (kind === 'convert' && filtered.assetIds.length === 0) {
+      await notifyUser(scoped, {
+        severity: 'warning',
+        title: '视频转码',
+        message: '所选资产中没有可转码的视频。图片不会进入转码任务。',
+      });
+      return;
+    }
+    const assetIds = filtered.assetIds;
+    const assets = filtered.assets;
+    const selection = kind === 'compress'
+      ? deriveSelectionFromContext(context, selectedAssetIds, selectedAssets)
+      : {
+        imageCount: 0,
+        videoCount: assetIds.length,
+        total: assetIds.length,
+        skippedImageCount: filtered.skippedImageCount,
+        skippedOtherCount: filtered.skippedOtherCount,
+      };
+    const rawResult = await serpent.ui.openDialog({
+      title: labelFor(kind),
+      submitLabel: '开始处理',
+      render(ui) {
+        return kind === 'compress'
+          ? renderCompressDialog(ui, selection)
+          : renderConvertDialog(ui, selection);
+      },
     });
-    if (options === null || typeof options !== 'object') return;
+    const values = unwrapDialogResult(rawResult);
+    if (values === null || typeof values !== 'object') return;
+    const options = optionsFromWidgetValues(kind, values);
+
+    // 防重入与竞态保护：检查是否有资产正在处理中
+    const busyAssetIds = assetIds.filter((id) => inFlightAssetIds.has(id));
+    if (busyAssetIds.length > 0) {
+      await notifyUser(scoped, {
+        severity: 'warning',
+        title: '任务正在处理中',
+        message: `所选资产中有 ${busyAssetIds.length} 个已有任务正在处理，请勿重复提交。`,
+      });
+      return;
+    }
+
+    for (const id of assetIds) inFlightAssetIds.add(id);
 
     let libraryRoot = null;
     try {
@@ -295,12 +503,12 @@ function createPluginRuntime(options = {}) {
     const request = {
       kind,
       assetIds,
+      assets,
       libraryId: targetLibraryId,
       libraryRoot,
       createdAt: Date.now(),
       options,
     };
-    const scoped = serpent.forLibrary(targetLibraryId);
     const requestFile = await createJobRequest({ directory: jobsDirectory, request });
     let result;
     try {
@@ -310,6 +518,7 @@ function createPluginRuntime(options = {}) {
         recoveryStrategy: 'idempotent',
       });
     } catch (error) {
+      for (const id of assetIds) inFlightAssetIds.delete(id);
       await deleteJobRequest({ directory: jobsDirectory, fileName: requestFile.fileName });
       throw error;
     }
@@ -324,7 +533,7 @@ function createPluginRuntime(options = {}) {
     await notifyUser(scoped, {
       severity: 'info',
       title: labelFor(kind),
-      message: `${assetIds.length} 个资产的批处理任务已开始。`,
+      message: `${assetIds.length} 个资产已开始处理，可于活动任务横幅查看进度。`,
     });
   }
 
@@ -385,7 +594,13 @@ async function dispose(reason) {
 module.exports = {
   PLUGIN_ID,
   PROGRESS_UNITS_PER_ASSET,
+  classifyAssets,
   createPluginRuntime,
+  deriveSelectionFromContext,
   dispose,
+  filterTargetsForCommand,
+  resolveCommandTargets,
   setup,
+  unwrapDialogResult,
+  optionsFromWidgetValues,
 };

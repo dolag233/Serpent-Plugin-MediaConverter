@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const {
   assembleAssetToFile,
   deriveLibraryRoot,
+  indexAssetSummaries,
   resolveManagedSourcePath,
   stageFileForReplace,
 } = require('../src/library-media');
@@ -98,4 +99,45 @@ test('stages a local file for replacement in bounded chunks', async () => {
   assert.equal(Buffer.concat(stagedChunks).toString(), 'x'.repeat(3000));
   assert.ok(progresses[progresses.length - 1] === 100);
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
+});
+
+test('indexes selected assets by id without a recursive library scan', async () => {
+  const calls = [];
+  const assets = {
+    async list(input) {
+      calls.push(input);
+      assert.deepEqual(input.assetIds, ['nested-asset']);
+      return {
+        items: [
+          { id: 'nested-asset', name: 'shot.mp4', folderId: 'folder-1', mimeType: 'video/mp4', relativeFilePath: '项目/shot.mp4' },
+        ],
+      };
+    },
+  };
+  const index = await indexAssetSummaries({
+    assets,
+    assetIds: ['nested-asset'],
+  });
+  assert.equal(index.size, 1);
+  assert.equal(index.get('nested-asset')?.displayName, 'shot.mp4');
+  assert.equal(index.get('nested-asset')?.mimeType, 'video/mp4');
+  assert.equal(index.get('nested-asset')?.relativeFilePath, '项目/shot.mp4');
+  assert.deepEqual(calls, [{ assetIds: ['nested-asset'], limit: 1, offset: 0 }]);
+});
+
+test('normalizes invocation snapshots including revision and folder id', () => {
+  const { normalizeAssetSummary } = require('../src/library-media');
+  const summary = normalizeAssetSummary({
+    id: 'asset-1',
+    name: 'clip.mp4',
+    relativeFilePath: '项目/clip.mp4',
+    mediaType: 'video',
+    byteSize: 4096,
+    currentRevisionId: 'rev-9',
+    folderId: 'folder-1',
+    locationKind: 'managed',
+  });
+  assert.equal(summary.assetId, 'asset-1');
+  assert.equal(summary.currentRevisionId, 'rev-9');
+  assert.equal(summary.managedFolderId, 'folder-1');
 });

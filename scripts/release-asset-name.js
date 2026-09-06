@@ -2,11 +2,11 @@
 
 /**
  * Release asset naming contract:
- * `Serpent-Plugin-MediaConverter-<version>-<platform>-<arch>.zip`
+ * `Serpent-Plugin-MediaConverter-<version>-any.zip`
  */
-function releaseAssetName(version, platform, arch) {
-  if (!version || !platform || !arch) throw new Error('version, platform, and arch are required.');
-  return `Serpent-Plugin-MediaConverter-${version}-${platform}-${arch}.zip`;
+function releaseAssetName(version, platform = 'any') {
+  if (!version) throw new Error('version is required.');
+  return `Serpent-Plugin-MediaConverter-${version}-${platform}.zip`;
 }
 
 function pluginVersionFromManifest(manifestPath) {

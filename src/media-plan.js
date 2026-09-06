@@ -12,7 +12,20 @@ const IMAGE_FORMATS = ['jpg', 'png', 'webp', 'avif'];
 const VIDEO_CODEC_LIBS = {
   h264: 'libx264',
   h265: 'libx265',
+  vp9: 'libvpx-vp9',
+  av1: 'libsvtav1',
 };
+
+/** Encoders that honor x264-style CRF. Host LGPL FFmpeg has none of these for H.264. */
+const CRF_VIDEO_ENCODERS = new Set([
+  'libx264',
+  'libx265',
+  'libvpx-vp9',
+  'libkvazaar',
+  'libsvtav1',
+  'libaom-av1',
+]);
+const PRESET_VIDEO_ENCODERS = new Set(['libx264', 'libx265']);
 
 const IMAGE_QUALITY_FLAG = {
   jpg: '-q:v',
@@ -68,14 +81,137 @@ function tokenizeAdvancedArgs(raw) {
   return tokens;
 }
 
+const MIN_TARGET_BYTES = 1024;
+
 function resolveTargetBytes(options, sourceByteSize) {
   if (options.targetMode === 'percent') {
-    return Math.max(64 * 1024, Math.round((sourceByteSize * clamp(options.percent ?? 50, 5, 95)) / 100));
+    return Math.max(MIN_TARGET_BYTES, Math.round((sourceByteSize * clamp(options.percent ?? 50, 5, 95)) / 100));
   }
   if (options.targetMode === 'size') {
-    return Math.max(64 * 1024, Math.round(options.targetBytes ?? 0));
+    return Math.max(MIN_TARGET_BYTES, Math.round(options.targetBytes ?? 0));
   }
   return null;
+}
+
+function videoEncoderFor(format, requestedCodec, encoders) {
+  const requested = typeof requestedCodec === 'string' ? requestedCodec : '';
+  if (format === 'webm') {
+    if (requested === 'av1') return encoders?.av1 ?? VIDEO_CODEC_LIBS.av1;
+    return encoders?.vp9 ?? VIDEO_CODEC_LIBS.vp9;
+  }
+  if (requested === 'h265') {
+    return encoders?.hevc ?? encoders?.h264 ?? VIDEO_CODEC_LIBS.h265;
+  }
+  if (requested === 'vp9') return encoders?.vp9 ?? VIDEO_CODEC_LIBS.vp9;
+  if (requested === 'av1') return encoders?.av1 ?? encoders?.vp9 ?? VIDEO_CODEC_LIBS.av1;
+  return encoders?.h264 ?? VIDEO_CODEC_LIBS.h264;
+}
+
+function containerVideoTags(format, codec) {
+  if (format !== 'mp4') return [];
+  if (codec === 'libvpx-vp9') return ['-tag:v', 'vp09'];
+  if (codec === 'libsvtav1' || codec === 'libaom-av1') return ['-tag:v', 'av01'];
+  return [];
+}
+
+/**
+ * `-b:v` is bits per second. A 50% size target for a 100s clip is ~4 Mbps,
+ * not "half the file in bits" dumped straight into the bitrate flag.
+ */
+function videoBitsPerSecondForSizeTarget({
+  targetBytes,
+  durationMicros,
+  hasAudio = true,
+  audioMode,
+}) {
+  const durationSeconds = Number(durationMicros) / 1_000_000;
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error('无法确定媒体时长，无法按目标大小压缩。请改用质量或码率模式，或检查源文件。');
+  }
+  const totalBitsPerSecond = (targetBytes * 8) / durationSeconds;
+  const audioBits = audioMode === 'none' || hasAudio === false
+    ? 0
+    : Math.min(192_000, Math.max(32_000, Math.round(totalBitsPerSecond * 0.12)));
+  return Math.max(64_000, Math.floor(totalBitsPerSecond - audioBits));
+}
+
+function qualityBitrateKbps(crf, sourceByteSize, durationMicros) {
+  const durationSeconds = Number(durationMicros) / 1_000_000;
+  if (Number.isFinite(durationSeconds) && durationSeconds > 0 && Number(sourceByteSize) > 0) {
+    const sourceKbps = (Number(sourceByteSize) * 8) / durationSeconds / 1000;
+    const factor = 1 - ((clamp(crf, 14, 34) - 14) / 20) * 0.75;
+    return Math.max(100, Math.round(sourceKbps * factor));
+  }
+  return crfToBitrateKbps(crf);
+}
+
+function audioArgsFor(format, audioMode, hasAudio = true) {
+  if (audioMode === 'none' || hasAudio === false) return ['-an'];
+  if (audioMode === 'copy' && format !== 'webm') return ['-c:a', 'copy'];
+  if (format === 'webm') return ['-c:a', 'libopus', '-b:a', '128k'];
+  return ['-c:a', 'aac', '-b:a', '192k'];
+}
+
+function isQualityMode(options) {
+  return options.targetMode === 'quality' || options.targetMode === undefined || options.targetMode === 'convert';
+}
+
+function isBitrateMode(options) {
+  return options.targetMode === 'bitrate';
+}
+
+function videoBitrateArgs(codec, kbps) {
+  const rate = Math.max(100, Math.min(100_000, Math.round(kbps)));
+  if (codec === 'libvpx-vp9') {
+    return ['-c:v', codec, '-b:v', `${rate}k`, '-deadline', 'good'];
+  }
+  const args = ['-c:v', codec];
+  if (PRESET_VIDEO_ENCODERS.has(codec)) args.push('-preset', 'medium');
+  args.push(
+    '-b:v', `${rate}k`,
+    '-maxrate', `${Math.round(rate * 1.45)}k`,
+    '-bufsize', `${Math.round(rate * 2)}k`,
+  );
+  return args;
+}
+
+function videoSizeBudgetArgs(codec, videoBits) {
+  if (codec === 'libvpx-vp9') {
+    return ['-c:v', codec, '-b:v', `${videoBits}`, '-maxrate', `${Math.round(videoBits * 1.45)}`, '-deadline', 'good'];
+  }
+  const args = ['-c:v', codec];
+  if (PRESET_VIDEO_ENCODERS.has(codec)) args.push('-preset', 'medium');
+  args.push(
+    '-b:v', `${videoBits}`,
+    '-maxrate', `${Math.round(videoBits * 1.45)}`,
+    '-bufsize', `${Math.round(videoBits * 2)}`,
+  );
+  return args;
+}
+
+function crfToBitrateKbps(crf) {
+  return Math.round(5000 - ((clamp(crf, 14, 34) - 14) / 20) * 4200);
+}
+
+function videoQualityArgs(codec, crf, source = {}) {
+  if (codec === 'libvpx-vp9') {
+    return ['-c:v', codec, '-b:v', '0', '-crf', String(crf), '-deadline', 'good'];
+  }
+  if (CRF_VIDEO_ENCODERS.has(codec)) {
+    const args = ['-c:v', codec];
+    if (PRESET_VIDEO_ENCODERS.has(codec)) args.push('-preset', 'medium');
+    args.push('-crf', String(crf));
+    return args;
+  }
+  return videoBitrateArgs(
+    codec,
+    qualityBitrateKbps(crf, source.sourceByteSize, source.durationMicros),
+  );
+}
+
+function withYuv420p(codec, args) {
+  if (codec === 'libvpx-vp9' || args.includes('-pix_fmt')) return args;
+  return [...args, '-pix_fmt', 'yuv420p'];
 }
 
 /**
@@ -85,7 +221,7 @@ function resolveTargetBytes(options, sourceByteSize) {
  * @param {string} input.outputPath
  * @param {number} input.durationMicros
  * @param {number} input.sourceByteSize
- * @param {object} input.options { videoFormat, videoCodec, crf, percent, targetBytes, targetMode, audioMode, advancedArgs }
+ * @param {object} input.options { videoFormat, videoCodec, crf, percent, targetBytes, targetMode, audioMode, advancedArgs, videoBitrateKbps }
  */
 function buildVideoArgs(input) {
   const { durationMicros, sourceByteSize, options } = input;
@@ -94,43 +230,36 @@ function buildVideoArgs(input) {
   const videoFormat = typeof options.videoFormat === 'string' && options.videoFormat.length > 0
     ? options.videoFormat
     : 'mp4';
-  const codec = VIDEO_CODEC_LIBS[options.videoCodec] ?? VIDEO_CODEC_LIBS.h264;
+  const codec = videoEncoderFor(videoFormat, options.videoCodec, input.encoders);
   const args = ['-y', '-i', input.inputPath];
 
   let qualityArgs;
-  if (options.targetMode === 'quality') {
+  if (isBitrateMode(options)) {
+    qualityArgs = videoBitrateArgs(codec, options.videoBitrateKbps ?? 2500);
+  } else if (isQualityMode(options)) {
     const crf = clamp(Math.round(options.crf ?? 23), 14, 34);
-    qualityArgs = ['-c:v', codec, '-preset', 'medium', '-crf', String(crf)];
+    qualityArgs = videoQualityArgs(codec, crf, { sourceByteSize, durationMicros });
   } else {
     const targetBytes = resolveTargetBytes(options, sourceByteSize);
     if (targetBytes === null) {
       throw new Error('压缩目标无效。');
     }
-    if (durationMicros <= 0) {
-      throw new Error('无法确定媒体时长，无法按目标大小压缩。请改用质量模式或检查源文件。');
-    }
-    const totalBits = targetBytes * 8;
-    const audioBits = options.audioMode === 'none'
-      ? 0
-      : Math.min(192_000, Math.max(32_000, Math.round(totalBits * 0.12)));
-    const videoBits = Math.max(64_000, Math.floor(totalBits - audioBits));
-    qualityArgs = [
-      '-c:v', codec,
-      '-preset', 'medium',
-      '-b:v', `${videoBits}`,
-      '-maxrate', `${Math.round(videoBits * 1.45)}`,
-      '-bufsize', `${Math.round(videoBits * 2)}`,
-    ];
+    const videoBits = videoBitsPerSecondForSizeTarget({
+      targetBytes,
+      durationMicros,
+      hasAudio: input.hasAudio !== false,
+      audioMode: options.audioMode,
+    });
+    qualityArgs = videoSizeBudgetArgs(codec, videoBits);
   }
+  qualityArgs = withYuv420p(codec, qualityArgs);
 
-  let audioArgs;
-  if (options.audioMode === 'none') audioArgs = ['-an'];
-  else if (options.audioMode === 'copy') audioArgs = ['-c:a', 'copy'];
-  else audioArgs = ['-c:a', 'aac', '-b:a', '192k'];
+  const audioArgs = audioArgsFor(videoFormat, options.audioMode, input.hasAudio !== false);
 
   args.push(
     ...qualityArgs,
     ...audioArgs,
+    ...containerVideoTags(videoFormat, codec),
     ...(videoFormat === 'mp4' ? ['-movflags', '+faststart'] : []),
     ...tokenizeAdvancedArgs(options.advancedArgs),
   );
@@ -150,7 +279,23 @@ function buildImageArgs(input) {
   const { options } = input;
   const imageFormat = IMAGE_FORMATS.includes(options.imageFormat) ? options.imageFormat : 'jpg';
   const args = ['-y', '-i', input.inputPath];
+
+  const filters = [];
+  if (
+    typeof options.scaleRatio === 'number'
+    && Number.isFinite(options.scaleRatio)
+    && options.scaleRatio > 0
+    && options.scaleRatio < 1
+  ) {
+    const r = options.scaleRatio.toFixed(4);
+    filters.push(`scale=trunc(iw*${r}/2)*2:trunc(ih*${r}/2)*2`);
+  }
+  if (filters.length > 0) {
+    args.push('-vf', filters.join(','));
+  }
+
   if (imageFormat === 'png') {
+    args.push('-compression_level', '9');
     args.push(...tokenizeAdvancedArgs(options.advancedArgs));
     args.push(input.outputPath);
     return args;
@@ -172,14 +317,15 @@ function buildImageArgs(input) {
  * targetBytes. Encodes at most `iterations` times.
  * @param {object} input
  * @param {(qualityArg: number) => Promise<number>} input.encodeAndGetBytes
- *   receives the FFmpeg quality flag value, returns the produced file size.
+ *   receives the quality search value (scale.min to scale.max), returns the produced file size.
  * @param {number} input.targetBytes
  * @param {'jpg'|'avif'|'webp'} input.format
- * @returns {Promise<{ qualityArg: number, bytes: number } | null>}
- *   null when even the smallest output exceeds the target.
+ * @param {boolean} [input.returnBestEffort]
+ *   if true, returns { qualityArg, bytes, overflow: true } when even worst quality exceeds targetBytes.
+ * @returns {Promise<{ qualityArg: number, bytes: number, overflow?: boolean } | null>}
  */
 async function searchImageQuality(input) {
-  const { encodeAndGetBytes, targetBytes, format } = input;
+  const { encodeAndGetBytes, targetBytes, format, returnBestEffort } = input;
   const scale = IMAGE_SEARCH_SCALES[format] ?? IMAGE_SEARCH_SCALES.jpg;
   let best = null;
   let low = scale.min;
@@ -187,10 +333,10 @@ async function searchImageQuality(input) {
   const iterations = Math.ceil(Math.log2(high - low + 1)) + 1;
   for (let iteration = 0; iteration < iterations && low <= high; iteration += 1) {
     const mid = Math.round((low + high) / 2);
-    const bytes = await encodeAndGetBytes(scale.toArg(mid));
+    const bytes = await encodeAndGetBytes(mid);
     if (bytes <= targetBytes) {
       // Fits — remember it and try better quality (smaller search value).
-      best = { qualityArg: scale.toArg(mid), bytes };
+      best = { qualityArg: mid, bytes };
       high = mid - 1;
     } else {
       // Output too large — degrade quality.
@@ -198,21 +344,33 @@ async function searchImageQuality(input) {
     }
   }
   if (best !== null) return best;
-  const worst = scale.toArg(scale.max);
-  const bytes = await encodeAndGetBytes(worst);
-  return bytes <= targetBytes ? { qualityArg: worst, bytes } : null;
+  const worstBytes = await encodeAndGetBytes(scale.max);
+  if (worstBytes <= targetBytes) {
+    return { qualityArg: scale.max, bytes: worstBytes };
+  }
+  return returnBestEffort === true ? { qualityArg: scale.max, bytes: worstBytes, overflow: true } : null;
 }
 
 module.exports = {
+  CRF_VIDEO_ENCODERS,
   IMAGE_FORMATS,
   IMAGE_SEARCH_SCALES,
+  MIN_TARGET_BYTES,
+  PRESET_VIDEO_ENCODERS,
   VIDEO_CODEC_LIBS,
   VIDEO_CONTAINERS,
+  audioArgsFor,
   buildImageArgs,
   buildVideoArgs,
   clamp,
+  crfToBitrateKbps,
   formatBytesForLog,
+  isBitrateMode,
+  isQualityMode,
   resolveTargetBytes,
   searchImageQuality,
   tokenizeAdvancedArgs,
+  videoBitsPerSecondForSizeTarget,
+  videoEncoderFor,
+  videoQualityArgs,
 };

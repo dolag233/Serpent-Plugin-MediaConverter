@@ -14,8 +14,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const READ_CHUNK_BYTES = 8 * 1024 * 1024;
-const STAGE_CHUNK_BYTES = 768 * 1024; // base64 ≈ 1 MiB, inside the transport budget
+const READ_CHUNK_BYTES = 768 * 1024; // decoded bytes stay inside the 1 MiB IPC budget
+const STAGE_CHUNK_BYTES = 768 * 1024;
 
 function isDirectory(filePath) {
   try {
@@ -32,6 +32,38 @@ function isFile(filePath) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Guest `assets.list` may return either the Worker summary or the projected
+ * guest shape (`id` / `name` / `folderId`, no relative path). Normalize both.
+ */
+function normalizeAssetSummary(item) {
+  if (item === null || typeof item !== 'object') return null;
+  const assetId = typeof item.assetId === 'string' && item.assetId.length > 0
+    ? item.assetId
+    : (typeof item.id === 'string' ? item.id : '');
+  if (assetId.length === 0) return null;
+  const displayName = typeof item.displayName === 'string' && item.displayName.length > 0
+    ? item.displayName
+    : (typeof item.name === 'string' && item.name.length > 0 ? item.name : assetId);
+  const managedFolderId = typeof item.managedFolderId === 'string'
+    ? item.managedFolderId
+    : (typeof item.folderId === 'string' ? item.folderId : null);
+  return {
+    assetId,
+    displayName,
+    managedFolderId,
+    locationKind: item.locationKind === 'linked' ? 'linked' : 'managed',
+    relativeFilePath: typeof item.relativeFilePath === 'string' ? item.relativeFilePath : '',
+    byteSize: typeof item.byteSize === 'number' && Number.isFinite(item.byteSize) ? item.byteSize : 0,
+    currentRevisionId: typeof item.currentRevisionId === 'string' && item.currentRevisionId.length > 0
+      ? item.currentRevisionId
+      : (typeof item.revisionId === 'string' && item.revisionId.length > 0 ? item.revisionId : null),
+    linkedFolderId: typeof item.linkedFolderId === 'string' ? item.linkedFolderId : null,
+    mimeType: typeof item.mimeType === 'string' ? item.mimeType : null,
+    mediaType: typeof item.mediaType === 'string' ? item.mediaType : null,
+  };
 }
 
 /**
@@ -71,6 +103,8 @@ async function assembleAssetToFile({ assets, assetId, destinationPath, signal })
   const handle = fs.openSync(destinationPath, 'w', 0o600);
   let offset = 0;
   let byteSize = 0;
+  let mimeType = null;
+  let revisionId = null;
   try {
     for (;;) {
       signal?.throwIfAborted?.();
@@ -79,6 +113,8 @@ async function assembleAssetToFile({ assets, assetId, destinationPath, signal })
         maxBytes: READ_CHUNK_BYTES,
       });
       byteSize = chunk.byteSize;
+      if (typeof chunk.mimeType === 'string' && chunk.mimeType.length > 0) mimeType = chunk.mimeType;
+      if (typeof chunk.revisionId === 'string' && chunk.revisionId.length > 0) revisionId = chunk.revisionId;
       const bytes = Buffer.from(chunk.dataBase64, 'base64');
       if (bytes.length > 0) fs.writeSync(handle, bytes);
       offset += bytes.length;
@@ -87,7 +123,7 @@ async function assembleAssetToFile({ assets, assetId, destinationPath, signal })
   } finally {
     fs.closeSync(handle);
   }
-  return { byteSize, assembled: true };
+  return { byteSize, assembled: true, mimeType, revisionId };
 }
 
 /**
@@ -108,14 +144,21 @@ async function resolveSourceFile({
       : resolveManagedSourcePath(libraryRoot, assetSummary.relativeFilePath);
     if (direct) return { filePath: direct, assembled: false };
   }
-  const destinationPath = path.join(workDirectory, `source-${assetSummary.assetId}${path.extname(assetSummary.relativeFilePath)}`);
-  const { byteSize } = await assembleAssetToFile({
+  const sourceName = assetSummary.relativeFilePath || assetSummary.displayName || '';
+  const destinationPath = path.join(workDirectory, `source-${assetSummary.assetId}${path.extname(sourceName)}`);
+  const assembled = await assembleAssetToFile({
     assets,
     assetId: assetSummary.assetId,
     destinationPath,
     signal,
   });
-  return { filePath: destinationPath, assembled: true, byteSize };
+  return {
+    filePath: destinationPath,
+    assembled: true,
+    byteSize: assembled.byteSize,
+    mimeType: assembled.mimeType,
+    revisionId: assembled.revisionId,
+  };
 }
 
 /**
@@ -158,30 +201,36 @@ async function stageFileForReplace({ assets, assetId, filePath, signal, onProgre
   return { stagingToken, byteSize };
 }
 
-/** Builds an id→summary index across paginated asset.list pages. */
+/** Fallback when the host did not snapshot the selected assets on invocation.
+ * Do not scan the whole library with recursive list.
+ */
 async function indexAssetSummaries({ assets, assetIds, signal }) {
-  const wanted = new Set(assetIds);
+  const unique = [...new Set(assetIds.filter((id) => typeof id === 'string' && id.length > 0))];
+  const wanted = new Set(unique);
   const index = new Map();
   const pageSize = 200;
-  for (let offset = 0; wanted.size > index.size; offset += pageSize) {
+  for (let offset = 0; offset < unique.length; offset += pageSize) {
     signal?.throwIfAborted?.();
-    const page = await assets.list({ limit: pageSize, offset });
+    const chunk = unique.slice(offset, offset + pageSize);
+    const page = await assets.list({ assetIds: chunk, limit: chunk.length, offset: 0 });
     const items = Array.isArray(page?.items) ? page.items : Array.isArray(page?.assets) ? page.assets : [];
-    for (const summary of items) {
-      if (wanted.has(summary.assetId) && !index.has(summary.assetId)) {
+    for (const item of items) {
+      const summary = normalizeAssetSummary(item);
+      if (summary && wanted.has(summary.assetId) && !index.has(summary.assetId)) {
         index.set(summary.assetId, summary);
       }
     }
-    if (items.length < pageSize) break;
   }
   return index;
 }
 
 module.exports = {
+  READ_CHUNK_BYTES,
   STAGE_CHUNK_BYTES,
   assembleAssetToFile,
   deriveLibraryRoot,
   indexAssetSummaries,
+  normalizeAssetSummary,
   resolveLinkedSourcePath,
   resolveManagedSourcePath,
   resolveSourceFile,

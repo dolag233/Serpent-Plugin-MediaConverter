@@ -1,40 +1,43 @@
 # Serpent-Plugin-MediaConverter
 
-Serpent 插件：基于 FFmpeg 的媒体资产批量**格式转换**与**压缩**。
+Serpent 插件：用**宿主内置 FFmpeg** 对选中资产做批量**视频转码**和**媒体压缩**。
 
 ## 功能
 
-- 资产右键菜单新增「格式转换…」与「压缩…」（支持多选）
-- 右键后打开侧栏「媒体转换」面板完成设置：
-  - **格式转换**：视频（MP4/MOV/MKV/WebM，H.264/H.265）与图像（JPG/PNG/WebP/AVIF）互转，支持音频（AAC/复制/移除）
-  - **压缩**：三种目标——原文件大小百分比、目标大小（MB）、固定质量（CRF）；图像按质量二分搜索逼近目标体积
-  - **FFmpeg 高级参数**：任意追加参数（如 `-vf scale=1920:-2`）
-- 批量执行以插件 Job 运行：进度百分比、取消、逐项失败报告；完成后系统通知
-- 输出：转换导入为新资产；压缩默认替换原资产（保留修订历史），可选导入为新资产
+在资源库里选中一笔或多笔资产，右键：
 
-## 安装与运行时
+- **视频转码**：仅视频。输出容器为 MP4 或 WebM。编码随容器切换：MP4 为 H.264 / H.265 / VP9 / AV1，WebM 为 VP9 / AV1。可设 CRF 或目标码率，音频默认复制。后缀留空会替换原资产；若容器变了，会改扩展名并保留同一资产上的标签等信息。
+- **压缩体积**：图片和视频设置完全分开。图像可按百分比、目标大小或质量；视频额外支持目标码率。按百分比/目标大小压缩时按时长换算视频码率，输出体积应小于源文件。音频默认复制。
 
-1. 主仓：设置 → 插件 → 本地安装本目录（或装 release zip）→ 信任 → 开库激活。
-2. FFmpeg 来源（按优先级）：
-   - 插件设置 `FFmpeg 可执行文件路径`
-   - 捆绑二进制 `runtime/bin/<platform>-<arch>/`（`npm run build` 自动下载，见下）
-   - 系统 PATH
+两个菜单都打开宿主标准对话框。文件名后缀留空表示替换原资产；填写后缀则另存为新资产。确认后以后台 Job 执行，进度走宿主任务条。
 
-## 构建
+FFmpeg / ffprobe 一律来自 Serpent 的 `serpent.media.getBinaryPaths()`，插件不提供路径设置，也不捆绑第二套二进制。
+
+## 安装
+
+1. 使用带 `serpent.ui.openDialog` 与 `serpent.media.getBinaryPaths` 的 Serpent 构建（当前开发分支）。
+2. 设置 → 插件 → 本地安装本目录（或 Release 的 `any` zip）→ 信任 → 开库激活。
+3. 选中视频或图片，右键使用上述两项。
+
+## 构建与测试
+
+插件 CI **不启动 Serpent / Electron**。对话框由宿主用标准化控件渲染：插件在 `openDialog({ render })` 里组合 `ui.select` / `ui.number` 等 widget，单测覆盖树的可见性切换和提交值形状。
 
 ```bash
-npm run build            # 下载各平台 FFmpeg (BtbN LGPL / evermeet) 到 runtime/bin
-npm test                 # 单元测试（无需二进制）
+npm test                 # 契约 + widget 树 + 管线（不需要本机 FFmpeg / Serpent）
 npm run check            # 语法检查
-npm run package:release  # 打包各平台 release zip 到 out/
+npm run package:release  # 打出平台无关 zip 到 out/
 ```
 
-本地已装 FFmpeg 时可跳过下载：`SERPENT_MEDIA_CONVERTER_FFMPEG=<目录> npm run build`（目录内含 ffmpeg/ffprobe）。
+本机若要在真实窗口里复验，先完整退出 Serpent 再 `npm start`，并重装/刷新本插件包。
 
-## 权限说明
+## 权限
 
-- `asset.read` / `content.read` / `content.write`：读取源媒体字节、写回压缩结果
-- `file.import`：转换产物导入为新资产
-- `data.files`：插件工作目录（任务请求与临时文件）
-- `job.manage`：批量任务的入队与进度上报
-- 其余为面板与通知所需的最小权限
+- `asset.read` / `content.read` / `content.write`：读源媒体、写回压缩结果
+- `file.import`：带后缀时导入为新资产
+- `file.rename`：转码改扩展名时原地重命名同一资产
+- `metadata.read` / `metadata.write` / `tag.read` / `tag.write`：另存为新资产时拷贝标签、评分等
+- `data.files`：任务请求文件
+- `job.manage`：批量任务入队与进度
+- `ui.dialogs` / `ui.notify`：设置面板与完成通知
+- `media.binaries`：使用宿主 FFmpeg
