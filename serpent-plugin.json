@@ -3,7 +3,17 @@
   "id": "com.dolag.serpent.media-converter",
   "version": "0.1.0",
   "name": "Media Converter",
-  "description": "Batch video conversion and image/video compression using the host FFmpeg.",
+  "description": "Batch compress and transcode media assets.",
+  "locales": {
+    "zh-CN": {
+      "name": "媒体转换器",
+      "description": "批量对多媒体资产进行压缩、转码"
+    },
+    "en": {
+      "name": "Media Converter",
+      "description": "Batch compress and transcode media assets."
+    }
+  },
   "author": "Dolag",
   "license": "MIT",
   "repository": "https://github.com/dolag233/Serpent-Plugin-MediaConverter",

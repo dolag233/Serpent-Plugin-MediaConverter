@@ -2,11 +2,12 @@
 
 /**
  * Release asset naming contract:
- * `Serpent-Plugin-MediaConverter-<version>-any.zip`
+ * `{pluginId}-{version}-{platform}.zip`
  */
-function releaseAssetName(version, platform = 'any') {
+function releaseAssetName(pluginId, version, platform = 'any') {
+  if (!pluginId) throw new Error('pluginId is required.');
   if (!version) throw new Error('version is required.');
-  return `Serpent-Plugin-MediaConverter-${version}-${platform}.zip`;
+  return `${pluginId}-${version}-${platform}.zip`;
 }
 
 function pluginVersionFromManifest(manifestPath) {

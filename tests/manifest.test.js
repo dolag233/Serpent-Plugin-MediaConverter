@@ -36,6 +36,13 @@ test('permissions are unique and include host FFmpeg plus dialogs', () => {
   requireCondition(!permissions.includes('trash.write'), 'the plugin must not trash assets silently');
 });
 
+test('localized display name describes batch compress and transcode', () => {
+  assert.equal(manifest.name, 'Media Converter');
+  assert.equal(manifest.locales['zh-CN'].name, '媒体转换器');
+  assert.equal(manifest.locales['zh-CN'].description, '批量对多媒体资产进行压缩、转码');
+  assert.equal(manifest.locales.en.name, 'Media Converter');
+});
+
 test('does not expose an FFmpeg path setting', () => {
   assert.equal(manifest.contributes.settings.length, 0);
 });
@@ -66,4 +73,12 @@ test('does not declare iframe dialog entries', () => {
   assert.equal(jobs[0].id, 'media-convert');
   assert.equal((manifest.contributes.dialogs ?? []).length, 0);
   assert.equal(manifest.contributes.views.length, 0);
+});
+
+test('release zip uses the Host plugin-id asset name', () => {
+  const { releaseAssetName } = require('../scripts/release-asset-name.js');
+  assert.equal(
+    releaseAssetName(manifest.id, manifest.version),
+    'com.dolag.serpent.media-converter-0.1.0-any.zip',
+  );
 });
