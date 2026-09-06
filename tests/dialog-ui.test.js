@@ -166,6 +166,23 @@ test('compress dialog splits image and video settings', () => {
   ui.applyChange('imageTargetMode', 'size');
   tree = ui.build((toolkit) => renderCompressDialog(toolkit, { imageCount: 1, videoCount: 2, total: 3 }));
   assert.ok(fieldIds(tree).includes('imageSizeValue'));
+  assert.ok(fieldIds(tree).includes('imageResolutionMode'));
+  assert.ok(fieldIds(tree).includes('videoResolutionMode'));
+  assert.equal(findField(tree, 'imageResolutionMode').value, 'off');
+  assert.equal(
+    findField(tree, 'imageResolutionMode').options.find((option) => option.value === 'off')?.label,
+    '原始分辨率',
+  );
+  ui.applyChange('imageResolutionMode', 'percent');
+  tree = ui.build((toolkit) => renderCompressDialog(toolkit, { imageCount: 1, videoCount: 2, total: 3 }));
+  assert.ok(fieldIds(tree).includes('imageResolutionPercent'));
+  assert.ok(!fieldIds(tree).includes('imageMaxEdgePreset'));
+  ui.applyChange('videoResolutionMode', 'max-edge');
+  tree = ui.build((toolkit) => renderCompressDialog(toolkit, { imageCount: 1, videoCount: 2, total: 3 }));
+  assert.ok(fieldIds(tree).includes('videoMaxEdgePreset'));
+  ui.applyChange('videoMaxEdgePreset', 'custom');
+  tree = ui.build((toolkit) => renderCompressDialog(toolkit, { imageCount: 1, videoCount: 2, total: 3 }));
+  assert.ok(fieldIds(tree).includes('videoMaxEdgeCustom'));
 });
 
 test('maps widget values onto convert/compress pipeline options', () => {
@@ -206,6 +223,37 @@ test('maps widget values onto convert/compress pipeline options', () => {
   const imageOptions = optionsForAsset('compress', compressed, false);
   assert.equal(imageOptions.targetMode, 'size');
   assert.equal(imageOptions.targetBytes, 2 * 1024 * 1024);
+  assert.equal(imageOptions.resolutionMode, 'off');
+});
+
+test('maps combined resolution and size targets onto pipeline options', () => {
+  const compressed = optionsFromWidgetValues('compress', {
+    imageTargetMode: 'percent',
+    imagePercent: 10,
+    imageResolutionMode: 'percent',
+    imageResolutionPercent: 50,
+    videoTargetMode: 'percent',
+    videoPercent: 10,
+    videoResolutionMode: 'max-edge',
+    videoMaxEdgePreset: '1080',
+    audioMode: 'copy',
+    videoCodec: 'h264',
+    suffix: '',
+    advancedArgs: '',
+  });
+  assert.equal(compressed.imageResolutionMode, 'percent');
+  assert.equal(compressed.imageResolutionPercent, 50);
+  assert.equal(compressed.videoResolutionMode, 'max-edge');
+  assert.equal(compressed.videoMaxEdge, 1080);
+  const imageOptions = optionsForAsset('compress', compressed, false);
+  assert.equal(imageOptions.targetMode, 'percent');
+  assert.equal(imageOptions.percent, 10);
+  assert.equal(imageOptions.resolutionMode, 'percent');
+  assert.equal(imageOptions.resolutionPercent, 50);
+  const videoOptions = optionsForAsset('compress', compressed, true);
+  assert.equal(videoOptions.targetMode, 'percent');
+  assert.equal(videoOptions.resolutionMode, 'max-edge');
+  assert.equal(videoOptions.maxEdge, 1080);
 });
 
 test('derives selection from context without blocking I/O', () => {

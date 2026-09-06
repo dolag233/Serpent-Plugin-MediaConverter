@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildImageArgs,
+  buildScaleFilter,
   buildVideoArgs,
   searchImageQuality,
   tokenizeAdvancedArgs,
@@ -230,4 +231,78 @@ test('webm AV1 uses the AV1 encoder, not H.264', () => {
   });
   assert.ok(args.includes('libsvtav1'));
   assert.ok(!args.includes('libopenh264'));
+});
+
+test('percent resolution writes an even-dimension scale filter', () => {
+  assert.equal(
+    buildScaleFilter({ resolutionMode: 'percent', resolutionPercent: 50 }),
+    'scale=trunc(iw*0.5000/2)*2:trunc(ih*0.5000/2)*2',
+  );
+  assert.equal(buildScaleFilter({ resolutionMode: 'off' }), null);
+  assert.equal(buildScaleFilter({ resolutionMode: 'percent', resolutionPercent: 100 }), null);
+});
+
+test('max-edge resolution caps the longest side without upscaling', () => {
+  const filter = buildScaleFilter({ resolutionMode: 'max-edge', maxEdge: 1920 });
+  assert.match(filter, /min\(iw,1920\)/u);
+  assert.match(filter, /min\(ih,1920\)/u);
+  assert.match(filter, /force_original_aspect_ratio=decrease/u);
+});
+
+test('overflow scaleRatio multiplies on top of a user percent', () => {
+  assert.equal(
+    buildScaleFilter({ resolutionMode: 'percent', resolutionPercent: 50, scaleRatio: 0.8 }),
+    'scale=trunc(iw*0.4000/2)*2:trunc(ih*0.4000/2)*2',
+  );
+});
+
+test('video percent size plus half resolution keeps bitrate and scale together', () => {
+  const args = buildVideoArgs({
+    inputPath: 'in.mp4',
+    outputPath: 'out.mp4',
+    durationMicros: 100_000_000,
+    sourceByteSize: 100 * 1024 * 1024,
+    options: {
+      targetMode: 'percent',
+      percent: 10,
+      resolutionMode: 'percent',
+      resolutionPercent: 50,
+      videoFormat: 'mp4',
+      videoCodec: 'h264',
+      audioMode: 'aac',
+    },
+  });
+  const vf = args.indexOf('-vf');
+  assert.ok(vf !== -1);
+  assert.match(args[vf + 1], /iw\*0\.5000/u);
+  const bvIndex = args.indexOf('-b:v');
+  // 10 MiB over 100s = 838,860.8 bit/s; audio is 12% capped at 192 kbps → 100,663.
+  assert.equal(args[bvIndex + 1], '738197');
+});
+
+test('image quality plus max-edge still emits scale before quality flags', () => {
+  const args = buildImageArgs({
+    inputPath: 'in.png',
+    outputPath: 'out.jpg',
+    options: {
+      imageFormat: 'jpg',
+      targetMode: 'quality',
+      crf: 8,
+      resolutionMode: 'max-edge',
+      maxEdge: 1080,
+    },
+  });
+  const vf = args.indexOf('-vf');
+  assert.ok(vf !== -1);
+  assert.match(args[vf + 1], /min\(iw,1080\)/u);
+  assert.ok(args.includes('-q:v'));
+});
+
+test('image args without resolution stay unscaled', () => {
+  const args = buildImageArgs({
+    inputPath: 'in.jpg',
+    outputPath: 'out.jpg',
+    options: { imageFormat: 'jpg', qualityArg: 12 },
+  });
+  assert.equal(args.indexOf('-vf'), -1);
 });

@@ -761,6 +761,92 @@ test('processes an image asset through quality and scale down to 50% and absolut
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
 });
 
+test('compress applies user resolution before the size target', async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'media-converter-res-'));
+  const workDirectory = path.join(temporaryRoot, 'work');
+  fs.mkdirSync(workDirectory, { recursive: true });
+  fs.mkdirSync(path.join(temporaryRoot, 'Assets'), { recursive: true });
+  fs.writeFileSync(path.join(temporaryRoot, 'Assets', 'photo.jpg'), Buffer.alloc(1000 * 1024, 0x7f));
+  fs.writeFileSync(path.join(temporaryRoot, 'Assets', 'clip.mp4'), 'fake-video');
+
+  const imageRuns = [];
+  await processAsset({
+    scoped: {},
+    libraryRoot: temporaryRoot,
+    linkedFolders: [],
+    assetSummary: assetSummary({
+      assetId: 'img-1',
+      displayName: 'photo.jpg',
+      relativeFilePath: 'photo.jpg',
+      byteSize: 1000 * 1024,
+      mediaType: 'image',
+    }),
+    request: {
+      kind: 'compress',
+      options: {
+        imageTargetMode: 'percent',
+        imagePercent: 10,
+        imageResolutionMode: 'percent',
+        imageResolutionPercent: 50,
+      },
+    },
+    binaries: fakeBinaries(),
+    workDirectory,
+    signal: new AbortController().signal,
+    runProcess: async ({ args }) => {
+      imageRuns.push(args);
+      const out = args[args.length - 1];
+      fs.writeFileSync(out, Buffer.alloc(80 * 1024, 0x11));
+    },
+  });
+  assert.ok(imageRuns.length > 0);
+  for (const args of imageRuns) {
+    const vf = args.indexOf('-vf');
+    assert.ok(vf !== -1, 'every image encode must include the user scale');
+    assert.match(args[vf + 1], /iw\*0\.5000/u);
+  }
+
+  const videoRuns = [];
+  await processAsset({
+    scoped: {},
+    libraryRoot: temporaryRoot,
+    linkedFolders: [],
+    assetSummary: assetSummary({
+      relativeFilePath: 'clip.mp4',
+      displayName: 'clip.mp4',
+      byteSize: 100 * 1024 * 1024,
+    }),
+    request: {
+      kind: 'compress',
+      options: {
+        videoTargetMode: 'percent',
+        videoPercent: 10,
+        videoResolutionMode: 'max-edge',
+        videoMaxEdge: 1920,
+        videoCodec: 'h264',
+        audioMode: 'aac',
+      },
+    },
+    binaries: fakeBinaries(),
+    workDirectory,
+    signal: new AbortController().signal,
+    probe: async () => ({
+      format: { duration: '100', size: String(100 * 1024 * 1024) },
+      streams: [{ codec_type: 'video' }, { codec_type: 'audio' }],
+    }),
+    runProcess: async ({ args }) => {
+      videoRuns.push(args);
+      fs.writeFileSync(args[args.length - 1], 'tiny');
+    },
+  });
+  const videoArgs = videoRuns[0];
+  const vf = videoArgs.indexOf('-vf');
+  assert.ok(vf !== -1);
+  assert.match(videoArgs[vf + 1], /min\(iw,1920\)/u);
+  assert.equal(videoArgs[videoArgs.indexOf('-b:v') + 1], '738197');
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+});
+
 test('commitOutput dynamically refreshes currentRevisionId when expectedRevisionId is stale', async () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'media-converter-refresh-rev-'));
   const outputPath = path.join(temporaryRoot, 'clip.mp4');

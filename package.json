@@ -10,7 +10,7 @@
   },
   "scripts": {
     "test": "node --test \"tests/*.test.js\"",
-    "check": "node --check entry/main.js && node --check src/plugin.js && node --check src/dialog-ui.js && node --check src/ffmpeg-runner.js && node --check src/media-plan.js && node --check src/library-media.js && node --check src/convert-pipeline.js && node --check src/job-request-store.js && node --check src/host-binaries.js && node --check scripts/package-release.mjs && node --check scripts/release-asset-name.js",
+    "check": "node --check entry/main.js && node --check src/plugin.js && node --check src/dialog-ui.js && node --check src/ffmpeg-runner.js && node --check src/media-plan.js && node --check src/library-media.js && node --check src/convert-pipeline.js && node --check src/job-request-store.js && node --check src/host-binaries.js && node --check scripts/package-release.mjs && node --check scripts/posix-zip.js && node --check scripts/release-asset-name.js",
     "package:release": "node scripts/package-release.mjs"
   }
 }

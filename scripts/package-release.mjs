@@ -7,14 +7,16 @@
  * FFmpeg is provided by the Serpent host, so the plugin zip has no native binaries.
  */
 
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { releaseAssetName } from './release-asset-name.js';
+
+const require = createRequire(import.meta.url);
+const { listZipLocalNames, writePosixZip } = require('./posix-zip.js');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(path.join(root, 'serpent-plugin.json'), 'utf8'));
@@ -23,14 +25,15 @@ const outDirectory = path.join(root, 'out');
 const sharedEntries = ['serpent-plugin.json', 'entry', 'src', 'README.md', 'LICENSE', 'THIRD-PARTY-NOTICES.md'];
 
 function zip(stagingDirectory, destination) {
-  if (process.platform === 'win32') {
-    execFileSync('powershell', [
-      '-NoProfile', '-Command',
-      `Compress-Archive -Path '${stagingDirectory}\\*' -DestinationPath '${destination}' -Force`,
-    ], { stdio: 'inherit' });
-    return;
+  const names = writePosixZip(stagingDirectory, destination);
+  const illegal = names.find((name) => name.includes('\\') || name.startsWith('./') || name.startsWith('/') || name.includes('..'));
+  if (illegal) {
+    throw new Error(`Release zip contains a non-POSIX path: ${illegal}`);
   }
-  execFileSync('zip', ['-r', destination, '.'], { cwd: stagingDirectory, stdio: 'inherit' });
+  const listed = listZipLocalNames(readFileSync(destination));
+  if (listed.some((name) => name.includes('\\') || name.startsWith('./'))) {
+    throw new Error('Release zip local headers are not POSIX paths.');
+  }
 }
 
 const stagingDirectory = path.join(outDirectory, 'staging-any');

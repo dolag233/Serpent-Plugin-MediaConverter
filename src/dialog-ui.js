@@ -64,6 +64,19 @@ const SIZE_UNITS = [
   { value: 'kb', label: 'KB' },
 ];
 
+const RESOLUTION_MODES = [
+  { value: 'off', label: '原始分辨率' },
+  { value: 'percent', label: '按百分比缩小' },
+  { value: 'max-edge', label: '最长边上限' },
+];
+
+const MAX_EDGE_PRESETS = [
+  { value: '1920', label: '1920 px' },
+  { value: '1080', label: '1080 px' },
+  { value: '720', label: '720 px' },
+  { value: 'custom', label: '自定义' },
+];
+
 const SUFFIX_DESCRIPTION = '留空表示替换原资产';
 
 function sizeFields(ui, ids, defaults) {
@@ -105,6 +118,50 @@ function bitrateField(ui, id, value) {
     step: 100,
     description: '平均视频码率。',
   });
+}
+
+function renderResolutionFields(ui, prefix, mode, preset) {
+  const current = mode.get();
+  const currentPreset = preset.get();
+  return [
+    ui.select({
+      id: `${prefix}ResolutionMode`,
+      label: '分辨率',
+      value: current,
+      onChange: mode.set,
+      options: RESOLUTION_MODES,
+    }),
+    current === 'percent'
+      ? ui.number({
+        id: `${prefix}ResolutionPercent`,
+        label: '分辨率（%）',
+        value: 50,
+        min: 5,
+        max: 100,
+        step: 1,
+        description: '相对源宽高缩放。50 表示边长一半，像素约四分之一。',
+      })
+      : null,
+    current === 'max-edge'
+      ? ui.select({
+        id: `${prefix}MaxEdgePreset`,
+        label: '最长边',
+        value: currentPreset,
+        onChange: preset.set,
+        options: MAX_EDGE_PRESETS,
+      })
+      : null,
+    current === 'max-edge' && currentPreset === 'custom'
+      ? ui.number({
+        id: `${prefix}MaxEdgeCustom`,
+        label: '自定义最长边（px）',
+        value: 1920,
+        min: 16,
+        max: 16_384,
+        step: 1,
+      })
+      : null,
+  ];
 }
 
 function suffixField(ui) {
@@ -201,9 +258,10 @@ function renderConvertDialog(ui, selection) {
   );
 }
 
-function renderImageTargetFields(ui, mode) {
+function renderImageTargetFields(ui, mode, resolutionMode, maxEdgePreset) {
   const current = mode.get();
   return [
+    ...renderResolutionFields(ui, 'image', resolutionMode, maxEdgePreset),
     ui.select({
       id: 'imageTargetMode',
       label: '压缩目标',
@@ -229,9 +287,10 @@ function renderImageTargetFields(ui, mode) {
   ];
 }
 
-function renderVideoTargetFields(ui, mode) {
+function renderVideoTargetFields(ui, mode, resolutionMode, maxEdgePreset) {
   const current = mode.get();
   return [
+    ...renderResolutionFields(ui, 'video', resolutionMode, maxEdgePreset),
     ui.select({
       id: 'videoTargetMode',
       label: '压缩目标',
@@ -277,6 +336,10 @@ function renderCompressDialog(ui, selection) {
   const showVideo = videoCount > 0 || imageCount === 0;
   const imageMode = ui.state('percent');
   const videoMode = ui.state('percent');
+  const imageResolutionMode = ui.state('off');
+  const videoResolutionMode = ui.state('off');
+  const imageMaxEdgePreset = ui.state('1920');
+  const videoMaxEdgePreset = ui.state('1920');
   const parts = [];
   if (showImage && showVideo) {
     parts.push(ui.note(`将压缩 ${imageCount} 张图片、${videoCount} 个视频。`));
@@ -288,14 +351,48 @@ function renderCompressDialog(ui, selection) {
     parts.push(ui.note(`将压缩 ${total} 个选中的资产。`));
   }
   if (showImage) {
-    parts.push(ui.heading('图像设置'), ...renderImageTargetFields(ui, imageMode));
+    parts.push(ui.heading('图像设置'), ...renderImageTargetFields(ui, imageMode, imageResolutionMode, imageMaxEdgePreset));
   }
   if (showVideo) {
     if (showImage) parts.push(ui.separator());
-    parts.push(ui.heading('视频设置'), ...renderVideoTargetFields(ui, videoMode));
+    parts.push(ui.heading('视频设置'), ...renderVideoTargetFields(ui, videoMode, videoResolutionMode, videoMaxEdgePreset));
   }
   parts.push(suffixField(ui), advancedField(ui));
   return ui.column(...parts);
+}
+
+function maxEdgeFromValues(values, prefix) {
+  const preset = String(values[`${prefix}MaxEdgePreset`] ?? '1920');
+  if (preset === 'custom') {
+    const custom = Number(values[`${prefix}MaxEdgeCustom`]);
+    return Number.isFinite(custom) ? Math.round(custom) : 1920;
+  }
+  const parsed = Number(preset);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1920;
+}
+
+function resolutionFromValues(values, prefix) {
+  const mode = String(values[`${prefix}ResolutionMode`] ?? 'off');
+  return {
+    [`${prefix}ResolutionMode`]: mode === 'percent' || mode === 'max-edge' ? mode : 'off',
+    [`${prefix}ResolutionPercent`]: Number(values[`${prefix}ResolutionPercent`]) || 50,
+    [`${prefix}MaxEdge`]: maxEdgeFromValues(values, prefix),
+  };
+}
+
+function flattenResolution(options, isVideo) {
+  if (isVideo) {
+    return {
+      resolutionMode: options.videoResolutionMode ?? options.resolutionMode ?? 'off',
+      resolutionPercent: options.videoResolutionPercent ?? options.resolutionPercent ?? 50,
+      maxEdge: options.videoMaxEdge ?? options.maxEdge ?? 1920,
+    };
+  }
+  return {
+    resolutionMode: options.imageResolutionMode ?? options.resolutionMode ?? 'off',
+    resolutionPercent: options.imageResolutionPercent ?? options.resolutionPercent ?? 50,
+    maxEdge: options.imageMaxEdge ?? options.maxEdge ?? 1920,
+  };
 }
 
 function targetBytesFromValues(values, valueKey, unitKey) {
@@ -329,11 +426,13 @@ function optionsFromWidgetValues(kind, values) {
     imagePercent: Number(values.imagePercent) || 50,
     imageTargetBytes: targetBytesFromValues(values, 'imageSizeValue', 'imageSizeUnit'),
     imageQuality: Number(values.imageQuality) || 8,
+    ...resolutionFromValues(values, 'image'),
     videoTargetMode: String(values.videoTargetMode ?? 'percent'),
     videoPercent: Number(values.videoPercent) || 50,
     videoTargetBytes: targetBytesFromValues(values, 'videoSizeValue', 'videoSizeUnit'),
     videoCrf: Number(values.videoCrf) || 23,
     videoBitrateKbps: Number(values.videoBitrateKbps) || 2500,
+    ...resolutionFromValues(values, 'video'),
   };
 }
 
@@ -347,6 +446,7 @@ function optionsForAsset(kind, options, isVideo) {
       targetBytes: options.videoTargetBytes,
       crf: options.videoCrf ?? 23,
       videoBitrateKbps: options.videoBitrateKbps,
+      ...flattenResolution(options, true),
     };
   }
   return {
@@ -355,6 +455,7 @@ function optionsForAsset(kind, options, isVideo) {
     percent: options.imagePercent ?? 50,
     targetBytes: options.imageTargetBytes,
     crf: options.imageQuality ?? 8,
+    ...flattenResolution(options, false),
   };
 }
 
@@ -363,6 +464,8 @@ module.exports = {
   CODECS_BY_CONTAINER,
   CONVERT_RATE_MODES,
   IMAGE_TARGET_MODES,
+  MAX_EDGE_PRESETS,
+  RESOLUTION_MODES,
   VIDEO_CODECS,
   VIDEO_FORMATS,
   VIDEO_TARGET_MODES,

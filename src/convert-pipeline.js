@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const { createAbortError, durationMicrosFromProbe, probeMedia, runFfmpeg } = require('./ffmpeg-runner');
 const {
+  IMAGE_SEARCH_SCALES,
   buildImageArgs,
   buildVideoArgs,
   formatBytesForLog,

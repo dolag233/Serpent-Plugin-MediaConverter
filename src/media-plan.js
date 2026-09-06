@@ -82,6 +82,67 @@ function tokenizeAdvancedArgs(raw) {
 }
 
 const MIN_TARGET_BYTES = 1024;
+const MIN_RESOLUTION_PERCENT = 5;
+const MAX_RESOLUTION_PERCENT = 100;
+const MIN_MAX_EDGE_PX = 16;
+const MAX_MAX_EDGE_PX = 16_384;
+const DEFAULT_MAX_EDGE_PX = 1920;
+
+function normalizeResolutionMode(value) {
+  if (value === 'percent' || value === 'max-edge') return value;
+  return 'off';
+}
+
+function resolutionPercentRatio(options) {
+  const percent = Number(options?.resolutionPercent);
+  const clamped = Number.isFinite(percent)
+    ? clamp(percent, MIN_RESOLUTION_PERCENT, MAX_RESOLUTION_PERCENT)
+    : 50;
+  return clamped / 100;
+}
+
+function maxEdgePixels(options) {
+  const edge = Number(options?.maxEdge);
+  if (!Number.isFinite(edge)) return DEFAULT_MAX_EDGE_PX;
+  return Math.round(clamp(edge, MIN_MAX_EDGE_PX, MAX_MAX_EDGE_PX));
+}
+
+function extraScaleRatio(options) {
+  const ratio = Number(options?.scaleRatio);
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) return 1;
+  return ratio;
+}
+
+function evenScaleByRatio(ratioLiteral) {
+  return `scale=trunc(iw*${ratioLiteral}/2)*2:trunc(ih*${ratioLiteral}/2)*2`;
+}
+
+/**
+ * User-facing resolution is an upper bound applied first. `scaleRatio` is the
+ * existing overflow downsample and multiplies on top of that bound.
+ */
+function buildScaleFilter(options) {
+  const mode = normalizeResolutionMode(options?.resolutionMode);
+  const extra = extraScaleRatio(options);
+
+  if (mode === 'percent') {
+    const combined = resolutionPercentRatio(options) * extra;
+    if (combined >= 0.999) return null;
+    return evenScaleByRatio(combined.toFixed(4));
+  }
+
+  if (mode === 'max-edge') {
+    const max = maxEdgePixels(options);
+    const cap = `scale=w='min(iw,${max})':h='min(ih,${max})':force_original_aspect_ratio=decrease`;
+    if (extra < 1) {
+      return `${cap},${evenScaleByRatio(extra.toFixed(4))}`;
+    }
+    return `${cap},scale=trunc(iw/2)*2:trunc(ih/2)*2`;
+  }
+
+  if (extra < 1) return evenScaleByRatio(extra.toFixed(4));
+  return null;
+}
 
 function resolveTargetBytes(options, sourceByteSize) {
   if (options.targetMode === 'percent') {
@@ -221,7 +282,7 @@ function withYuv420p(codec, args) {
  * @param {string} input.outputPath
  * @param {number} input.durationMicros
  * @param {number} input.sourceByteSize
- * @param {object} input.options { videoFormat, videoCodec, crf, percent, targetBytes, targetMode, audioMode, advancedArgs, videoBitrateKbps }
+ * @param {object} input.options { videoFormat, videoCodec, crf, percent, targetBytes, targetMode, audioMode, advancedArgs, videoBitrateKbps, resolutionMode, resolutionPercent, maxEdge, scaleRatio }
  */
 function buildVideoArgs(input) {
   const { durationMicros, sourceByteSize, options } = input;
@@ -232,6 +293,8 @@ function buildVideoArgs(input) {
     : 'mp4';
   const codec = videoEncoderFor(videoFormat, options.videoCodec, input.encoders);
   const args = ['-y', '-i', input.inputPath];
+  const scaleFilter = buildScaleFilter(options);
+  if (scaleFilter) args.push('-vf', scaleFilter);
 
   let qualityArgs;
   if (isBitrateMode(options)) {
@@ -272,7 +335,7 @@ function buildVideoArgs(input) {
  * @param {object} input
  * @param {string} input.inputPath
  * @param {string} input.outputPath
- * @param {object} input.options { imageFormat, crf, qualityArg?, advancedArgs }
+ * @param {object} input.options { imageFormat, crf, qualityArg?, advancedArgs, resolutionMode, resolutionPercent, maxEdge, scaleRatio }
  *  `qualityArg` is resolved by searchImageQuality for size/percent targets.
  */
 function buildImageArgs(input) {
@@ -280,19 +343,8 @@ function buildImageArgs(input) {
   const imageFormat = IMAGE_FORMATS.includes(options.imageFormat) ? options.imageFormat : 'jpg';
   const args = ['-y', '-i', input.inputPath];
 
-  const filters = [];
-  if (
-    typeof options.scaleRatio === 'number'
-    && Number.isFinite(options.scaleRatio)
-    && options.scaleRatio > 0
-    && options.scaleRatio < 1
-  ) {
-    const r = options.scaleRatio.toFixed(4);
-    filters.push(`scale=trunc(iw*${r}/2)*2:trunc(ih*${r}/2)*2`);
-  }
-  if (filters.length > 0) {
-    args.push('-vf', filters.join(','));
-  }
+  const scaleFilter = buildScaleFilter(options);
+  if (scaleFilter) args.push('-vf', scaleFilter);
 
   if (imageFormat === 'png') {
     args.push('-compression_level', '9');
@@ -353,9 +405,15 @@ async function searchImageQuality(input) {
 
 module.exports = {
   CRF_VIDEO_ENCODERS,
+  DEFAULT_MAX_EDGE_PX,
   IMAGE_FORMATS,
   IMAGE_SEARCH_SCALES,
+  MAX_MAX_EDGE_PX,
+  MIN_MAX_EDGE_PX,
+  MIN_RESOLUTION_PERCENT,
+  MAX_RESOLUTION_PERCENT,
   MIN_TARGET_BYTES,
+  buildScaleFilter,
   PRESET_VIDEO_ENCODERS,
   VIDEO_CODEC_LIBS,
   VIDEO_CONTAINERS,
