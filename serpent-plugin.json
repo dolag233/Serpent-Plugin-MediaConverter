@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "com.dolag.serpent.media-converter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "Media Converter",
   "description": "Batch compress and transcode media assets.",
   "locales": {

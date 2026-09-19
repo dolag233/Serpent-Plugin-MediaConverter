@@ -1,10 +1,16 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const { cleanupStaleRequests, createJobRequest, deleteJobRequest, readJobRequest } = require('./job-request-store');
+const {
+  cleanupStaleWorkCache,
+  createJobWorkDirectory,
+  defaultWorkRoot,
+  ensureWorkRoot,
+  startWorkCacheSweeper,
+} = require('./work-cache');
 const { deriveLibraryRoot, indexAssetSummaries, normalizeAssetSummary } = require('./library-media');
 const { commitOutput, isImageAsset, isVideoAsset, processAsset, shouldReplaceOriginal } = require('./convert-pipeline');
 const { createAbortError, listFfmpegEncoders, pickVideoEncoders } = require('./ffmpeg-runner');
@@ -235,6 +241,8 @@ function createPluginRuntime(options = {}) {
   let lifecycleSignal;
   let jobsDirectory;
   let workRoot;
+  const activeWorkDirectories = new Set();
+  let stopWorkCacheSweeper;
   let currentCancellation;
   let initialized = false;
   let disposed = false;
@@ -261,7 +269,8 @@ function createPluginRuntime(options = {}) {
     const binaries = await resolveHostBinaries(serpent);
     const cancellation = createCancellationBridge({ jobSignal, lifecycleSignal });
     currentCancellation = cancellation;
-    const workDirectory = fs.mkdtempSync(path.join(workRoot, 'job-'));
+    const workDirectory = createJobWorkDirectory(workRoot);
+    activeWorkDirectories.add(workDirectory);
     let totalAssets = request.assetIds.length;
     const progressTotal = Math.max(1, totalAssets) * PROGRESS_UNITS_PER_ASSET;
     const progressSink = createJobProgressSink({
@@ -427,6 +436,8 @@ function createPluginRuntime(options = {}) {
       cancellation.dispose();
       if (currentCancellation === cancellation) currentCancellation = undefined;
       try { fs.rmSync(workDirectory, { recursive: true, force: true }); } catch { /* best effort */ }
+      activeWorkDirectories.delete(workDirectory);
+      cleanupStaleWorkCache(workRoot, { keep: activeWorkDirectories });
     }
   }
 
@@ -548,10 +559,15 @@ function createPluginRuntime(options = {}) {
 
     const userData = await serpent.data.getDirectory({ scope: 'user' });
     jobsDirectory = path.join(userData.path, 'jobs');
-    workRoot = path.join(os.tmpdir(), 'serpent-media-converter');
+    workRoot = options.workRoot ?? defaultWorkRoot();
     fs.mkdirSync(jobsDirectory, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(workRoot, { recursive: true, mode: 0o700 });
+    ensureWorkRoot(workRoot);
     cleanupStaleRequests(jobsDirectory);
+    cleanupStaleWorkCache(workRoot, { keep: activeWorkDirectories });
+    stopWorkCacheSweeper = startWorkCacheSweeper(workRoot, {
+      intervalMs: options.workCacheSweepIntervalMs,
+      keep: activeWorkDirectories,
+    });
 
     serpent.commands.register('mediaconverter.open-convert', (commandContext) => runOpenDialogCommand(commandContext, 'convert'));
     serpent.commands.register('mediaconverter.open-compress', (commandContext) => runOpenDialogCommand(commandContext, 'compress'));
@@ -572,6 +588,9 @@ function createPluginRuntime(options = {}) {
     disposed = true;
     currentCancellation?.abort();
     currentCancellation = undefined;
+    stopWorkCacheSweeper?.();
+    stopWorkCacheSweeper = undefined;
+    if (workRoot) cleanupStaleWorkCache(workRoot, { keep: activeWorkDirectories });
     void reason;
   }
 
